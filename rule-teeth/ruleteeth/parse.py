@@ -11,9 +11,9 @@ from pathlib import Path
 from . import engine
 from .model import Candidate, RuleFile
 
-# Claude Code 每个 session 自动加载的项目级文件（官方文档 memory 页「How CLAUDE.md files load」）
-ROOT_CLAUDE = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
-ROOT_AGENTS = ("AGENTS.md", ".claude/AGENTS.md")
+# Claude Code 每个 session 自动加载的项目级文件（定义在 engine，它要能单独复制走）
+ROOT_CLAUDE = engine.ROOT_CLAUDE
+ROOT_AGENTS = engine.ROOT_AGENTS
 # 其它 AI 编程工具的规则文件：Claude 不自动读，但同样是「写给 AI 的规则」
 OTHER_TOOLS = (".cursorrules", ".windsurfrules", "GEMINI.md", ".github/copilot-instructions.md")
 RULE_DOC_NAME = re.compile(r"宪法|规则|规范|守则|约定|rules?\b|guidelines?|conventions?|constitution|polic(?:y|ies)|standards?",
@@ -26,8 +26,6 @@ _BULLET = re.compile(r"^(\s*)(?:[-*+]|\d{1,3}[.)、])\s+(.*)$")
 _TABLE = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _QUOTE = re.compile(r"^\s*>\s?(.*)$")
-_IMPORT = re.compile(r"(?<![`\w@])@((?:[^\s`\\]|\\ )+)")
-_CODE_SPAN = re.compile(r"`[^`\n]*`")
 
 
 def clean(s: str) -> str:
@@ -36,16 +34,7 @@ def clean(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def frontmatter(text: str):
-    """返回 (frontmatter 行数, paths 列表)。只认 .claude/rules 用到的 paths 字段。"""
-    if not text.startswith("---\n"):
-        return 0, ()
-    end = text.find("\n---", 4)
-    if end < 0:
-        return 0, ()
-    block = text[4:end]
-    paths = re.findall(r"^\s*-\s*[\"']?([^\"'\n]+?)[\"']?\s*$", block, re.M) if "paths" in block else []
-    return block.count("\n") + 3, tuple(paths)
+frontmatter = engine.frontmatter
 
 
 def split_candidates(rel: str, text: str) -> list:
@@ -137,16 +126,7 @@ def _read(root: Path, rel: str) -> str | None:
     return engine.read_text(root / rel)
 
 
-def imports_of(text: str) -> list:
-    """CLAUDE.md 里的 @path 导入（跳过代码块和反引号，和 Claude Code 的规则一致）。"""
-    body = re.sub(r"(?ms)^\s*(```|~~~).*?^\s*\1", "", text)
-    body = _CODE_SPAN.sub("", body)
-    out = []
-    for m in _IMPORT.finditer(body):
-        p = m.group(1).replace("\\ ", " ").rstrip(".,;:)）。，")
-        if "/" in p or "." in p:
-            out.append(p)
-    return out
+imports_of = engine.imports_of
 
 
 def referenced_paths(text: str) -> list:

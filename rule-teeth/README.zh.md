@@ -22,7 +22,7 @@ stop and tell the user; the user decides whether to change the rule.
 
 ## 它做三件事
 
-1. **体检**（只读）：每条规则分成三类 —— 能自动检查 / 要人判断 / 写得太模糊；再告诉你哪些从来没被机器检查过、哪些只服务一个子项目该下沉、根文件是不是超了体量、哪些路径已经断了。
+1. **体检**（只读）：先算**每次必读链** —— 每个 session 开工前固定要读多少 token，连规则里写着「每个 session 都读」的文件一起算；再把每条规则分成三类 —— 能自动检查 / 要人判断 / 写得太模糊；再告诉你哪些从来没被机器检查过、哪些只服务一个子项目该下沉、根文件是不是超了体量、哪些路径已经断了。
 2. **装牙**：能查的规则生成可运行的检查（Python，只用标准库），写进项目里的 `.rule-teeth/`，一条命令挂进 Claude Code 的 hook。
 3. **咬人**：AI 改文件、跑命令之前先过一遍；要结束之前再过一遍。违反了就拦下，并告诉 AI 违反的是哪条、写在第几行。
 
@@ -61,6 +61,10 @@ python3 hands-off/rule-teeth/rule_teeth.py unhook /你的项目
 作者自己的私有仓库（16 个子项目，作者本人不写代码）的体检，一句话结论：
 
 > **一句话**：51 条规则，**42 条从来没被机器检查过**（82%），只靠 AI 自觉；4 条现在就能装上牙。
+>
+> **第一条发现**：每个 session 开工前固定要读约 14,945 token 的规则；根文件只占 3,251，另外 4 个文件是规则里写着「每次都读」带进来的。
+
+花一个下午把规则搬到该在的层之后：每个 session 3,737 token，一条规则都没删。怎么做的：[LAYERS.zh.md](LAYERS.zh.md)。
 
 两个公开项目的 AGENTS.md 也体检过（只读，只给位置和分类，不转载原文）：[vercel/next.js](demo/public/vercel-next.js_AGENTS.md_checkup.md)（33KB、550 行，是官方建议 200 行的近 3 倍，每个 session 约 9,400 token；71 条规则里 8 条能直接变成 hook）、[openai/openai-agents-python](demo/public/openai-agents-python_AGENTS.md_checkup.md)。
 
@@ -85,6 +89,11 @@ python3 hands-off/rule-teeth/rule_teeth.py unhook /你的项目
 | 不许跑的命令 | 「Do NOT `gh pr ready`」「用 `pnpm` 不用 `npm`」「commit 里不许写 "Generated with …"」 | 跑命令前 |
 | 结束前必须跑通的命令 | 「改完代码跑 `pytest`」 | 结束前（**默认关**，要你亲手打开） |
 | 回复开头 | 「回复都以 "John —" 开头」 | 结束前 |
+| 每次必读预算 | 「每个 session 固定要读的规则合计不超过 4,000 token」—— 根文件、`@导入`、不带 paths 的 `.claude/rules`、规则里写着「每次都读」的文件一起算 | 改这条链上的任何文件前、结束前 |
+
+## 规则越写越多，token 怎么不涨
+
+一条规则的成本 = 被加载的次数 × 长度；它管不管用 = 违反那一刻它在不在 AI（或机器）眼前。所以每条规则放进还来得及生效的最便宜那层：**牙**（违反前 0 token，拦截信息里带着规则原文）→ **根**（每个 session）→ **路径**（带 `paths:` 的 `.claude/rules`、子目录 `CLAUDE.md`）→ **触发**（「做 Y 时读 X」、skill）→ **档案**。项目越长越大，靠「每次必读预算」这颗牙自动保持。方法、给新规则找位置的三问、改造前后的数字：[LAYERS.zh.md](LAYERS.zh.md)。
 
 ## 安全设计
 
@@ -99,9 +108,10 @@ python3 hands-off/rule-teeth/rule_teeth.py unhook /你的项目
 
 官方的 prompt-audit 用 AI 读你的规则文件，找过时、冲突、引用了不存在文件的地方，给出修改建议 —— 它让规则**写得更好**。rule-teeth 不跟它抢：它把规则变成**机器执行的检查**，挂进 hook，让规则**真的被遵守**。官方文档自己也说：CLAUDE.md 是上下文，不是强制配置；必须在某个时间点执行的事，应该写成 hook。rule-teeth 就是把这件事自动化。两个可以一起用。
 
-## 已知局限（第一版）
+## 已知局限（v0.2）
 
-- 只认第一版内置的 7 种牙。「函数不超过 50 行」要按语言做语法分析，还没做。
+- 「写着每次都读」靠中英文常见说法认（「每个 session 都读」「开工前先读」、标题写着「每个 session 都读」、read X at the start of every session 等），别的说法会漏算；「」或引号里提到的算谈论规则，不算规则。
+- 只认内置的 8 种牙。「函数不超过 50 行」要按语言做语法分析，还没做。
 - 走 Bash 写文件（`cat > a.py`）绕过了改文件前的检查；结束前的全量检查会补上，但那时文件已经写了。
 - 「已有检查」是线索不是证明：测试 / CI / hook 文件里出现了规则编号或它独有的写法就算。
 - 只读一份别人的 AGENTS.md 时，看不到他们的仓库，所以不说「从没被检查过」，只说「规则文件里没写明由谁兜底」。
@@ -127,6 +137,7 @@ ruleteeth/
   install.py           写 .rule-teeth/、挂 / 摘 hook
   model.py             数据类型（每个概念只定义一次）
 tests/                 自带测试
+LAYERS.zh.md           分层方法：五层、三问、每次必读预算
 demo/                  两个公开项目 AGENTS.md 的体检报告
 ```
 

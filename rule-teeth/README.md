@@ -22,7 +22,7 @@ You wrote 50 rules into `CLAUDE.md`, the AI still ignores some, so you write 80,
 
 ## What it does
 
-1. **Checkup** (read-only): sorts every rule into *checkable* / *needs human judgment* / *too vague*; then tells you which rules have never been machine-checked, which serve only one subproject and should move down, whether the root file is over its size budget, and which paths it points to no longer exist.
+1. **Checkup** (read-only): measures the **always-read chain** — how many tokens every session reads before doing anything, including files your rules say to "read every session"; sorts every rule into *checkable* / *needs human judgment* / *too vague*; then tells you which rules have never been machine-checked, which serve only one subproject and should move down, whether the root file is over its size budget, and which paths it points to no longer exist.
 2. **Teeth**: generates runnable checks for the checkable rules (Python, standard library only) into `.rule-teeth/` in your project, and wires them into Claude Code hooks with one command.
 3. **Bite**: before the AI edits a file or runs a command, and again before it stops, the checks run. A broken rule blocks the action and tells the AI which rule, and on which line of which file.
 
@@ -61,6 +61,10 @@ Don't like typing commands? Tell Claude Code: "Run a rule-teeth checkup on this 
 On the author's own private monorepo (16 subprojects, built by a founder who does not write code):
 
 > **In one line**: 51 rules, **42 have never been checked by a machine** (82%) — they rely on the AI remembering; 4 can get teeth right now.
+>
+> **Top finding**: every session reads ~14,945 tokens of rules before doing anything; the root file is only 3,251 of them — 4 files come in because the rules say to read them every session.
+
+After one afternoon of moving rules into the right layers: 3,737 tokens per session, no rule deleted. How: [LAYERS.md](LAYERS.md).
 
 On public projects (read-only; locations and categories only, no rule text reproduced): [vercel/next.js AGENTS.md](demo/public/vercel-next.js_AGENTS.md_checkup.md) is 33KB / 550 lines — nearly 3× Claude Code's recommended 200 lines, ~9,400 tokens in every session — and 8 of its 71 rules can become hooks today, e.g. "do not add *Generated with Claude Code* footers to commits" and "do not run `gh pr ready`". Also: [openai/openai-agents-python](demo/public/openai-agents-python_AGENTS.md_checkup.md).
 
@@ -85,6 +89,11 @@ When unsure, rule-teeth **files a rule under "needs judgment" rather than genera
 | Forbidden command | "do NOT `gh pr ready`", "use `pnpm`, not `npm`", "no *Generated with…* in commits" | before commands |
 | Must-pass command | "run `pytest` after changes" | before stopping (**off by default**; you switch it on) |
 | Reply prefix | "replies start with *John —*" | before stopping |
+| Always-read budget | "rules read at the start of every session total under 4,000 tokens" — counts the root, `@imports`, unscoped `.claude/rules`, and files the rules say to read every session | before edits to anything on that chain, before stopping |
+
+## More rules without more tokens
+
+A rule costs (how often it is loaded) × (its length), and it only works if it is in front of the AI — or a machine — when it could be broken. So each rule goes in the cheapest layer that still fires in time: **teeth** (0 tokens until broken; the block message carries the rule) → **root** (every session) → **path-scoped** (`.claude/rules` with `paths:`, subdirectory `CLAUDE.md`) → **trigger** ("read X when doing Y", skills) → **archive**. The always-read budget tooth keeps it that way as the project grows. The method, the three questions for placing a new rule, and before/after numbers: [LAYERS.md](LAYERS.md).
 
 ## Safety by design
 
@@ -99,9 +108,10 @@ When unsure, rule-teeth **files a rule under "needs judgment" rather than genera
 
 prompt-audit has an AI read your instruction files and propose edits for outdated, conflicting or dangling content — it makes rules **better written**. rule-teeth turns rules into **machine-enforced checks** in hooks — it makes rules **actually followed**. Claude Code's own docs say CLAUDE.md is context, not enforced configuration, and that anything that must happen at a specific point should be a hook. rule-teeth automates that step. Use both.
 
-## Known limits (v0.1)
+## Known limits (v0.2)
 
-- Seven kinds of teeth only. Function-length limits need per-language parsing; not done yet.
+- "Told to read every session" is recognised from common Chinese and English phrasings ("read X at the start of every session", a heading like "Read every session", 每个 session 都读, 开工前先读). Other phrasings are missed; phrases quoted in 「」 or "" are treated as talk about the rule, not the rule.
+- Eight kinds of teeth only. Function-length limits need per-language parsing; not done yet.
 - Writing a file through Bash (`cat > a.py`) skips the pre-edit check; the stop check catches it afterwards.
 - "Checked by" is a lead, not proof: a rule counts as checked when its ID or its distinctive pattern appears in a test / CI / hook file.
 - When checking someone else's `AGENTS.md` alone, their repo is not scanned, so the report never claims a rule is unchecked — only that the file does not say what enforces it.
@@ -127,6 +137,7 @@ ruleteeth/
   install.py           write .rule-teeth/, add / remove the hook
   model.py             data types (each concept defined once)
 tests/                 the test suite
+LAYERS.md              the layering method: five layers, three questions, the always-read budget
 demo/                  checkups of two public AGENTS.md files
 ```
 

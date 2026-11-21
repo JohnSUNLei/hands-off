@@ -16,6 +16,7 @@ from .model import CHECKABLE, JUDGMENT, VAGUE, Finding, Rule
 
 DEFAULT_MAX_LINES = 200          # Claude Code 官方建议：每个 CLAUDE.md 200 行以内
 DEFAULT_MAX_KB = 10              # 本仓库「宪法分层规则」：项目根约 10KB
+DEFAULT_BUDGET = 4000            # 每次必读链没写预算时，按「200 行」折算的默认参考线（中文约 4,000 token）
 CHECK_FILE = re.compile(
     r"(^|/)(tests?|spec|__tests__|e2e)/|(^|/)test_[^/]+$|_test\.[a-z]+$|\.(test|spec)\.[a-z]+$|"
     r"^\.github/workflows/|^\.husky/|(^|/)\.pre-commit-config\.ya?ml$|(^|/)lefthook\.ya?ml$|"
@@ -26,7 +27,7 @@ GENERIC_DIRS = {"docs", "doc", "agents", "scripts", "script", "tests", "test", "
 MONOREPO_DIRS = ("packages", "apps", "crates", "libs", "services", "plugins", "modules")
 MANIFESTS = ("package.json", "pyproject.toml", "setup.py", "go.mod", "Cargo.toml", "README.md", "CLAUDE.md",
              "AGENTS.md")
-CJK = re.compile(r"[㐀-鿿豈-﫿　-〿＀-￯]")
+CJK = engine.CJK
 
 
 @dataclass
@@ -48,6 +49,9 @@ class Checkup:
     current: list = field(default_factory=list)       # 按规则原文扫一遍，现在就不符合的地方（Violation）
     teeth: dict = field(default_factory=dict)         # 已装的 rule-teeth：source → 检查编号
     single: bool = False                              # 只看了一份规则文件，没扫它的仓库
+    chain: list = field(default_factory=list)         # 每次必读链（engine.Loaded），项目自己能管的部分
+    machine: list = field(default_factory=list)       # 这台电脑另加的：用户级、上级目录、自动记忆
+    budget: int = DEFAULT_BUDGET
 
     def by(self, category: str) -> list:
         return [r for r in self.rules if r.category == category]
@@ -57,10 +61,7 @@ class Checkup:
         return [r for r in self.rules if not r.checked_by]
 
 
-def estimate_tokens(text: str) -> int:
-    """粗估：中日韩字符约 1 token / 字，其它约 1 token / 3.5 字符。只用来比大小，不是计费。"""
-    cjk = len(CJK.findall(text))
-    return int(cjk + (len(text) - cjk) / 3.5)
+estimate_tokens = engine.estimate_tokens
 
 
 def detect_lang(texts: list) -> str:
@@ -92,6 +93,16 @@ def _installed_teeth(root: Path) -> dict:
     except ValueError:
         return {}
     return {c.get("source", ""): c["id"] for c in doc.get("checks", []) if c.get("enabled", True)}
+
+
+def _installed_budget(root: Path) -> list:
+    """已装的 load_budget 预算（装了就以它为准，体检和 hook 说同一个数）。"""
+    try:
+        doc = json.loads(engine.rules_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [c["max_tokens"] for c in doc.get("checks", [])
+            if c.get("type") == "load_budget" and c.get("enabled", True) and c.get("max_tokens")]
 
 
 def build_checks(rules: list, lang: str) -> list:
@@ -329,6 +340,11 @@ def run(root, include=(), lang: str = "", max_lines: int = DEFAULT_MAX_LINES, ma
     cu.coverage = coverage_gaps(rules, rfiles, check_texts, subs, files)
     every = [{**c, "enabled": True} for c in build_checks(rules, lang)]
     cu.current = engine.check_project(root, {"lang": lang, "checks": every})
+    cu.chain = engine.load_chain(root)
+    project = {x.path for x in cu.chain}
+    cu.machine = [x for x in engine.load_chain(root, machine=True) if x.path not in project]
+    written = [c["max_tokens"] for c in every if c["type"] == "load_budget"]
+    cu.budget = int((_installed_budget(root) or written or [DEFAULT_BUDGET])[0])
     cu.findings = rank_findings(cu)
     return cu
 
@@ -375,6 +391,21 @@ def rank_findings(cu: Checkup) -> list:
                                 f"`{rf.path}` is {word}: {nbytes:,} bytes / {nlines} lines (limit {lim_b // 1024}KB / "
                                 f"{lim_l} lines); every session pays ~{toks:,} tokens for it"),
                                where=rf.path))
+    if cu.chain:
+        total_t = engine.chain_tokens(cu.chain)
+        root_t = sum(x.tokens for x in cu.chain if x.how == "root")
+        soft = [x for x in cu.chain if x.how == "soft"]
+        soft_t = sum(x.tokens for x in soft)
+        over_b = total_t > cu.budget
+        if over_b or soft or total_t >= 0.9 * cu.budget:
+            title = (f"每个 session 开工前固定要读约 {total_t:,} token 的规则（预算 {cu.budget:,}）；根文件只占 {root_t:,}"
+                     + (f"，{len(soft)} 个文件是规则里写着「每次都读」带进来的（{soft_t:,}）" if soft else "")
+                     if zh else
+                     f"Every session reads ~{total_t:,} tokens of rules before doing anything (budget {cu.budget:,}); the "
+                     f"root file is only {root_t:,}" + (f", and {len(soft)} files ({soft_t:,}) come in because the rules "
+                                                        f"say to read them every session" if soft else ""))
+            out.append(Finding("load_chain", 3 if over_b else 2, title,
+                               items=sorted(cu.chain, key=lambda x: -x.tokens)))
     if total and cu.single:
         out.append(Finding("unchecked", 2,
                            (f"只看规则文件本身：{total} 条规则里，没有一条写明由哪个检查兜底（没扫他们的仓库，那边也许另有检查）"
@@ -456,7 +487,7 @@ def rank_findings(cu: Checkup) -> list:
                             "Both CLAUDE.md and AGENTS.md exist at the root: by default Claude Code reads only CLAUDE.md, "
                             "so the rules in AGENTS.md never reach it (unless CLAUDE.md imports @AGENTS.md)"),
                            where=", ".join(ignored)))
-    order = ["size", "unchecked", "coverage", "quick_win", "dead_link", "current", "sink", "agents_ignored", "vague", "external", "duplicate"]
+    order = ["load_chain", "size", "unchecked", "coverage", "quick_win", "dead_link", "current", "sink", "agents_ignored", "vague", "external", "duplicate"]
     return sorted(out, key=lambda f: (-f.severity, order.index(f.kind)))
 
 

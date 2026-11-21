@@ -20,6 +20,12 @@ L = {
         "checked": "已有机器检查", "unchecked": "从没被检查过",
         "top": "前 {n} 条发现", "more": "另有 {n} 条，见下文",
         "sizes": "每个 session 自动加载的规则文件", "size_cols": "| 文件 | 字节 | 行 | ≈token | 状态 |",
+        "chain": "每次必读链：每个 session 开工前固定要读的东西", "chain_cols": "| 文件 | 怎么进来的 | 被谁带进来 | ≈token |",
+        "chain_total": "项目合计", "chain_budget": "预算 {b:,} token：{state}",
+        "chain_machine": "这台电脑另加（用户级 / 上级目录 / 自动记忆，不算进项目预算）",
+        "chain_note": ("「写着每次都读」= 规则里有「每个 session 都读 X」「开工前先读 X」这类话 —— AI 照做，X 就成了固定成本，"
+                       "但它不在 Claude Code 的加载清单里，所以官方的 /context 和 200 行建议都看不到它。"
+                       "最便宜的省法通常就在这里：改成「做 Y 时读 X」。分层方法见 rule-teeth 的 LAYERS.zh.md。"),
         "ok": "✅ 没超", "near": "⚠️ 贴线", "over": "❌ 超了",
         "teeth": "能自动查的规则 —— 可以一键装上牙", "teeth_cols": "| 位置 | 规则 | 生成的检查 | 现状 |",
         "teeth_note": "装牙：`python3 rule_teeth.py init {path} --hook`。命令类检查（Stop 时跑测试）默认关着，要你在 `.rule-teeth/rules.json` 里亲手打开 —— 工具不会自作主张替你跑命令。",
@@ -55,6 +61,13 @@ L = {
         "checked": "Already machine-checked", "unchecked": "Never checked",
         "top": "Top {n} findings", "more": "{n} more below",
         "sizes": "Rule files auto-loaded into every session", "size_cols": "| File | Bytes | Lines | ≈tokens | Status |",
+        "chain": "The always-read chain: what every session reads before doing anything", "chain_cols": "| File | How it gets in | Brought in by | ≈tokens |",
+        "chain_total": "Project total", "chain_budget": "budget {b:,} tokens: {state}",
+        "chain_machine": "Added on this machine (user-level / parent folders / auto memory; not counted in the project budget)",
+        "chain_note": ("\"Told to read every session\" = the rules say \"read X at the start of every session\" or similar. The AI "
+                       "complies, so X becomes a fixed cost — yet it is not on Claude Code's load list, so /context and the "
+                       "200-line advice never see it. This is usually the cheapest place to cut: make it \"read X when doing Y\". "
+                       "The layering method is in rule-teeth's LAYERS.md."),
         "ok": "✅ within limit", "near": "⚠️ at the limit", "over": "❌ over",
         "teeth": "Checkable rules — teeth you can install with one command", "teeth_cols": "| Where | Rule | Generated check | Status |",
         "teeth_note": "Install: `python3 rule_teeth.py init {path} --hook`. Command checks (run tests at Stop) start switched off; you turn them on by hand in `.rule-teeth/rules.json` — the tool never decides on its own to run commands for you.",
@@ -113,6 +126,9 @@ def describe_check(spec: dict, lang: str) -> str:
         return (f"结束前跑 `{spec['command']}`{cwd}，默认关" if zh else f"run `{spec['command']}`{cwd} before stopping, off by default")
     if t == "reply_prefix":
         return (f"回复必须以「{spec['prefix']}」开头" if zh else f"replies must start with \"{spec['prefix']}\"")
+    if t == "load_budget":
+        return (f"每次必读链 ≤ {spec['max_tokens']:,} token（根 + @导入 + 不带 paths 的 rules + 写着每次都读的文件）" if zh else
+                f"always-read chain ≤ {spec['max_tokens']:,} tokens (root + @imports + unscoped rules + files the rules say to read every session)")
     return t
 
 
@@ -169,6 +185,7 @@ def render(cu: Checkup, name: str = "", quote: bool = True, top: int = 5) -> str
     out.append("")
 
     out += _sizes(cu, T)
+    out += _chain(cu, T)
     out += _teeth(cu, T, quote)
     out += _sink(cu, T, quote)
     dead = _simple_table(T["dead"], T["dead_cols"],
@@ -195,7 +212,9 @@ def _finding_examples(f, lang: str, quote: bool) -> list:
     items = f.items[:3]
     lines = []
     for it in items:
-        if hasattr(it, "cand"):
+        if isinstance(it, engine.Loaded):
+            lines.append(f"`{it.path}` ≈{it.tokens:,} token · {engine._t(lang, 'how_' + it.how)}")
+        elif hasattr(it, "cand"):
             extra = "; ".join(describe_check(c, lang) for c in it.checks) if it.checks else (it.hint or "")
             lines.append(f"{it.cand.where} {_cell(it.text, quote, 50)}" + (f" → {extra}" if extra else ""))
         elif isinstance(it, tuple) and it and hasattr(it[0], "cand"):
@@ -219,6 +238,23 @@ def _sizes(cu: Checkup, T: dict) -> list:
         out.append(_row("**Σ**", f"{sum(s[1] for s in cu.sizes):,}", sum(s[2] for s in cu.sizes),
                         f"{sum(s[4] for s in cu.sizes):,}", ""))
     return out + [""]
+
+
+def _chain(cu: Checkup, T: dict) -> list:
+    if not cu.chain:
+        return []
+    lang = cu.lang
+    out = [f"## {T['chain']}", "", T["chain_cols"], "|---|---|---|---:|"]
+    for x in cu.chain:
+        out.append(_row(f"`{x.path}`", engine._t(lang, "how_" + x.how), f"`{x.by}`" if x.by else "", f"{x.tokens:,}"))
+    total = engine.chain_tokens(cu.chain)
+    state = T["over"] if total > cu.budget else (T["near"] if total >= 0.9 * cu.budget else T["ok"])
+    out.append(_row(f"**{T['chain_total']}**", T["chain_budget"].format(b=cu.budget, state=state), "", f"**{total:,}**"))
+    if cu.machine:
+        out.append(_row(f"_{T['chain_machine']}_", "", "", ""))
+        for x in cu.machine:
+            out.append(_row(f"`{x.path}`", engine._t(lang, "how_" + x.how), "", f"{x.tokens:,}"))
+    return out + ["", T["chain_note"], ""]
 
 
 def _teeth(cu: Checkup, T: dict, quote: bool) -> list:

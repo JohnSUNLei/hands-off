@@ -36,7 +36,7 @@ def make_doc(cu: checkup.Checkup, baseline_days: int = 30) -> dict:
            "generated_at": _dt.date.today().isoformat(), "lang": cu.lang,
            "checks": checkup.build_checks(cu.rules, cu.lang), "baseline": []}
     every = {**doc, "checks": [{**c, "enabled": True} for c in doc["checks"]]}
-    current = engine.check_project(cu.root, every)      # 关着的也登记，免得以后一打开就把老问题全算成新违规
+    current = engine.check_project(cu.root, every) + engine.check_budgets(cu.root, every)   # 关着的也登记，免得以后一打开就把老问题全算成新违规
     doc["baseline"] = engine.make_baseline(current, baseline_days)
     return doc
 

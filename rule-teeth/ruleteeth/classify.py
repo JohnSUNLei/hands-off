@@ -75,6 +75,14 @@ LINE_LIMIT = (
     re.compile(r"(\d[\d,]*)\s*(?:lines|loc)\s*(?:max|maximum|limit|or (?:less|fewer))\b", re.I),
 )
 KB_LIMIT = re.compile(r"(\d+(?:\.\d+)?)\s*KB", re.I)
+# 「每次必读的规则合计不超过 4,000 token」→ load_budget
+BUDGET_WORDS = re.compile(r"每次必读|每个\s*session|每次\s*(?:session|会话)|固定(?:要读|成本|加载)|自动加载|加载链|"
+                          r"always[- ]?(?:on|loaded)|(?:every|each) session|load(?:ed)? at (?:session )?start|session start|"
+                          r"load chain", re.I)
+BUDGET_LIMIT = re.compile(r"(?:不超过|不得超过|不能超过|上限|以内|之内|预算|≤|<=|under|at most|no more than|budget|max(?:imum)?)"
+                          r"[^0-9\n]{0,30}?(\d[\d,]*(?:\.\d+)?)\s*([kK千万])?\s*(?:个\s*)?tokens?\b"
+                          r"|(\d[\d,]*(?:\.\d+)?)\s*([kK千万])?\s*(?:个\s*)?tokens?\s*(?:以内|之内|上限|为限|or less|max(?:imum)?)",
+                          re.I)
 FUNC_WORDS = re.compile(r"函数|方法|function|method|class|类(?!型)", re.I)
 RULEFILE_WORDS = re.compile(r"CLAUDE\.md|AGENTS\.md|本文件|这份文件|根文件|项目根|宪法.{0,4}根|this file|root file|"
                             r"rule files?|instruction files?", re.I)
@@ -312,6 +320,17 @@ def _max_lines(c: Candidate, text: str, file_lang: str, root_file: str):
     return spec
 
 
+def _load_budget(text: str):
+    if not BUDGET_WORDS.search(text):
+        return None
+    m = BUDGET_LIMIT.search(text)
+    if not m:
+        return None
+    num, unit = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+    n = float(num.replace(",", "")) * {"k": 1000, "K": 1000, "千": 1000, "万": 10000}.get(unit or "", 1)
+    return {"type": "load_budget", "max_tokens": int(n)} if n >= 200 else None
+
+
 def _secrets(text: str, file_lang: str):
     said_no = any(SECRET_WORDS.search(cl) and SECRET_VERBS.search(cl) and _negation(cl, True)
                   for cl, _ in _clauses(text))
@@ -413,11 +432,11 @@ def extract_checks(c: Candidate, file_lang: str = "", root_file: str = "CLAUDE.m
     """一条规则能生成哪些检查。顺序就是优先级，同一类只取一个。"""
     text = (c.text + "\n" + c.detail).strip()
     out = []
-    for spec in (_max_lines(c, text, file_lang, root_file), _secrets(text, file_lang), _reply_prefix(text),
+    for spec in (_load_budget(text), _max_lines(c, text, file_lang, root_file), _secrets(text, file_lang), _reply_prefix(text),
                  _run_command(text), _forbid_command(text), _protected(text), _forbid_pattern(text, file_lang, c.section)):
         if spec:
             out.append(spec)
-    if any(s["type"] in ("max_lines", "no_secrets", "reply_prefix") for s in out):
+    if any(s["type"] in ("load_budget", "max_lines", "no_secrets", "reply_prefix") for s in out):
         out = [s for s in out if s["type"] not in ("forbid_pattern",)]
     return out
 

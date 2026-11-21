@@ -11,6 +11,9 @@
 2. `check`：扫整个项目，报违规；
 3. `hook`：被 Claude Code 调用（stdin 是 JSON），违规就 exit 2 —— 当场拦下。
 
+另外它会算「每次必读链」：每个 session 开工前 AI 固定要读的规则（根 CLAUDE.md、@导入、不带 paths 的
+.claude/rules、以及规则里写着「每个 session 都读」的文件）。这是规则的固定成本，load_budget 检查管它的上限。
+
 检查一律是确定性的（正则、计数、跑命令），不调任何模型：同样的输入永远得到同样的结论。
 """
 from __future__ import annotations
@@ -27,7 +30,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 RULES_DIR = ".rule-teeth"
 RULES_FILE = "rules.json"
 STATE_FILE = "state.json"          # Stop 防死循环的小状态，不进 git
@@ -35,7 +38,7 @@ MAX_FILE_BYTES = 1_000_000          # 更大的文件不扫（多半是生成物
 STOP_RETRIES = 2                    # 同一批违规连拦几次后放行（并明说没解决）
 
 CHECK_TYPES = ("max_lines", "forbid_pattern", "no_secrets", "protected_path",
-               "forbid_command", "run_command", "reply_prefix")
+               "forbid_command", "run_command", "reply_prefix", "load_budget")
 # 每种检查在哪个时机生效。写死在这里，不让每条检查各配各的 —— 少一个旋钮就少一种配错。
 EVENTS = {
     "max_lines": ("edit", "scan"),
@@ -45,6 +48,7 @@ EVENTS = {
     "forbid_command": ("bash",),
     "run_command": ("stop",),
     "reply_prefix": ("stop",),
+    "load_budget": ("edit", "stop"),      # 管的是整条「每次必读链」，不是单个文件
 }
 
 LANG_EXTS = {
@@ -111,6 +115,17 @@ MSG = {
         "over": "比登记暂缓时又多了",
         "total": "合计违规 {n} 处",
         "none": "没有违规。",
+        "budget": "每个 session 固定要读的规则约 {n:,} token，超过预算 {limit:,}：{parts}",
+        "budget_grows": "（本来就超了，这次还在变多：{before:,} → {n:,}）",
+        "budget_fix": "省法：只服务某个子项目的规则，搬进它自己的 CLAUDE.md 或带 paths: 的 .claude/rules/*.md；"
+                      "已经装了牙的规则，根里只留一行指针；「每个 session 都读 X」改成「做 Y 时读 X」；变更记录、历史移出加载链。",
+        "how_root": "根文件",
+        "how_import": "@导入",
+        "how_rules": "不带 paths 的 .claude/rules",
+        "how_soft": "规则里写着每次都读",
+        "how_user": "用户级 ~/.claude",
+        "how_ancestor": "上级目录",
+        "how_memory": "自动记忆 MEMORY.md",
     },
     "en": {
         "block_edit": "rule-teeth blocked this edit — it would break a rule written in your project's rule file:",
@@ -136,6 +151,18 @@ MSG = {
         "over": "more than when it was deferred",
         "total": "{n} violation(s)",
         "none": "No violations.",
+        "budget": "rules read at the start of every session total ~{n:,} tokens, over the {limit:,} budget: {parts}",
+        "budget_grows": " (already over, and this edit adds more: {before:,} → {n:,})",
+        "budget_fix": "How to cut: move rules that serve one subproject into its own CLAUDE.md or a .claude/rules/*.md "
+                      "with paths:; once a rule has teeth, keep only a one-line pointer at the root; turn \"read X every "
+                      "session\" into \"read X when doing Y\"; move changelogs and history out of the load chain.",
+        "how_root": "root file",
+        "how_import": "@import",
+        "how_rules": ".claude/rules without paths",
+        "how_soft": "told to read every session",
+        "how_user": "user-level ~/.claude",
+        "how_ancestor": "parent directory",
+        "how_memory": "auto memory MEMORY.md",
     },
 }
 
@@ -150,7 +177,7 @@ class Violation:
     source: str = ""    # 源规则位置，如 CLAUDE.md:42
 
     def __str__(self):
-        where = f"{self.file}:{self.line}" if self.file else "-"
+        where = (f"{self.file}:{self.line}" if self.line else self.file) if self.file else "-"
         return f"[{self.check}] {where}  {self.msg}"
 
 
@@ -359,6 +386,8 @@ def check_edit(root, doc: dict, rel: str, before: str, after: str) -> list:
     lang = doc.get("lang", "en")
     out = []
     for c in active(doc, "edit"):
+        if c["type"] == "load_budget":
+            continue                              # 整条链的事，下面单独算
         if c["type"] == "protected_path":
             if any(match_glob(rel, p) for p in c.get("paths") or []):
                 out.extend(_stamp(c, [Violation(c["id"], rel, 0, _t(lang, "protected"))]))
@@ -382,6 +411,7 @@ def check_edit(root, doc: dict, rel: str, before: str, after: str) -> list:
                 seen[v.msg] -= 1
             else:
                 out.append(v)
+    out.extend(check_budget_edit(root, doc, Path(root) / rel, before, after))
     return out
 
 
@@ -432,6 +462,335 @@ def check_reply(doc: dict, message: str) -> list:
     for c in active(doc, "stop"):
         if c["type"] == "reply_prefix" and message.strip() and not message.lstrip().startswith(c["prefix"]):
             out.extend(_stamp(c, [Violation(c["id"], "", 0, _t(lang, "prefix", p=c["prefix"]))]))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 每次必读链：规则的固定成本（load_budget）
+#
+# Claude Code 每个 session 开工就加载的：根 CLAUDE.md / .claude/CLAUDE.md / CLAUDE.local.md（没有 CLAUDE.md 时是
+# AGENTS.md）、它们的 @导入（最多四层）、不带 paths: 的 .claude/rules/**/*.md。官方文档：memory 页。
+# 还有一种文档里看不出来的：规则里写着「每个 session 都读 X」—— AI 照做，X 也就每次都读了。这里叫「软导入」，
+# 一样算进固定成本。带 paths: 的 rules、子目录的 CLAUDE.md 是碰到相关文件才加载，不算。
+# ---------------------------------------------------------------------------
+ROOT_CLAUDE = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
+ROOT_AGENTS = ("AGENTS.md", ".claude/AGENTS.md")
+IMPORT_DEPTH = 4                     # 官方：@导入最多递归四层；软导入沿用同一上限
+MEMORY_LINES, MEMORY_BYTES = 200, 25_000   # 官方：MEMORY.md 开工只读前 200 行或 25KB
+CJK = re.compile(r"[㐀-鿿豈-﫿　-〿＀-￯]")
+_FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
+_HEAD_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d{1,3}[.)、])\s+")
+_LABEL_RE = re.compile(r"^\*\*[^*\n]{1,40}[:：]\s*\*\*")      # 「**按需读：**」这种加粗小标签，自成一段
+_IMPORT_RE = re.compile(r"(?<![`\w@])@((?:[^\s`\\]|\\ )+)")
+_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+# 「每个 session 都读」这类话。标题命中 → 整节都算；正文命中 → 这一段算。
+SOFT_HEAD = re.compile(r"每个\s*session|每次\s*(?:session|会话|对话|开工)|新\s*session|session\s*(?:开始|启动|接管)|"
+                       r"接管\s*checklist|开工必读|必读(?![链预])|\b(?:every|each|new) session\b|\bsession start\b|"
+                       r"\bbefore (?:every|each|any) (?:session|task)\b|\balways read\b|\bmust[- ]read\b", re.I)
+SOFT_LINE = re.compile(r"每个\s*session\s*都?\s*(?:要|必须|先)?\s*读(?!的)|每次(?:都|必须|先)\s*读(?!的)|必读(?![链预])|"
+                       r"新\s*session\s*(?:都|必须|要)?\s*先\s*(?:读|看)|session\s*(?:开始|启动)(?:时|前|后)?[，,]?\s*(?:先|必须)?\s*读|"
+                       r"(?:工作|开工|开始|动手|干活)前[，,]?\s*(?:先|必须)?\s*读|先读这份|"
+                       r"\balways read\b|\bmust[- ]read\b|\bat the start of (?:every|each) (?:session|task)\b|"
+                       r"\b(?:every|each) session\b[^.\n]{0,40}\bread\b|\bread\b[^.\n]{0,60}\bbefore (?:every|each|any) (?:session|task)\b",
+                       re.I)
+# 说的是「按需读」「不用每次读」，或者在讲预算本身 —— 不是软导入
+SOFT_SKIP = re.compile(r"不再|不用|不必|无需|按需|需要时|用到时|才读|才看|如适用|若适用|拿不准|预算|"
+                       r"同步规则|同步到|写进|写入|记进|记到|落盘|更新到|\bsync(?:ed)? to\b|\bwrite (?:it )?(?:to|into)\b|"
+                       r"\bappend to\b|"
+                       r"\bwhen (?:needed|relevant|you need)\b|\bon demand\b|\bonly (?:when|if)\b|"
+                       r"\bif (?:needed|relevant|applicable)\b|\bnot every\b|\bno need\b|\bdon'?t need\b|\boptional\b|"
+                       r"\bbudget\b", re.I)
+_CLAUSE_RE = re.compile(r"[。；;！!？?]|\s+—+\s+|——|(?<=\S)\.\s+")
+_SOFT_PATH = re.compile(r"`([^`\n]+)`|\]\(([^)\s]+)\)|(?<![\w`(/])(~/[^\s`)）]+)")
+
+
+@dataclass
+class Loaded:
+    """每次必读链上的一个文件。"""
+    path: str           # 项目内是相对路径；项目外显示成 ~/… 或绝对路径
+    how: str            # root / import / rules / soft；machine=True 时还有 user / ancestor / memory
+    by: str             # 被谁带进来的（软导入、@导入才有）
+    tokens: int
+    nbytes: int
+    outside: bool       # 在项目外（换台电脑可能就没有）
+
+
+def estimate_tokens(text: str) -> int:
+    """粗估：中日韩字符约 1 token / 字，其它约 1 token / 3.5 字符。只用来比大小，不是计费。"""
+    cjk = len(CJK.findall(text))
+    return int(cjk + (len(text) - cjk) / 3.5)
+
+
+def frontmatter(text: str):
+    """返回 (frontmatter 行数, paths 列表)。只认 .claude/rules 用到的 paths 字段（列表或逗号分隔都认）。"""
+    if not text.startswith("---\n"):
+        return 0, ()
+    end = text.find("\n---", 4)
+    if end < 0:
+        return 0, ()
+    block = text[4:end]
+    paths = []
+    if "paths" in block:
+        paths = re.findall(r"^\s*-\s*[\"']?([^\"'\n]+?)[\"']?\s*$", block, re.M)
+        inline = re.search(r"^\s*paths\s*:\s*(\S.*)$", block, re.M)
+        if not paths and inline:
+            paths = [x.strip().strip("\"'[] ") for x in inline.group(1).split(",") if x.strip().strip("\"'[] ")]
+    return block.count("\n") + 3, tuple(paths)
+
+
+def imports_of(text: str) -> list:
+    """CLAUDE.md 里的 @path 导入（跳过代码块和反引号，和 Claude Code 的规则一致）。"""
+    body = re.sub(r"(?ms)^\s*(```|~~~).*?^\s*\1", "", text)
+    body = _CODE_SPAN_RE.sub("", body)
+    out = []
+    for m in _IMPORT_RE.finditer(body):
+        q = m.group(1).replace("\\ ", " ").rstrip(".,;:)）。，")
+        if "/" in q or "." in q:
+            out.append(q)
+    return out
+
+
+def _units(text: str):
+    """把 Markdown 切成「一段话 / 一个列表项 / 一行表格 / 一个标题」：(行号, 文字, 是不是标题, 标题级别)。"""
+    out, cur, start, fence = [], [], 0, False
+
+    def flush():
+        if cur:
+            out.append((start, " ".join(cur), False, 0))
+            cur.clear()
+
+    for i, ln in enumerate(text.splitlines(), 1):
+        if _FENCE_RE.match(ln):
+            flush()
+            fence = not fence
+            continue
+        if fence:
+            continue
+        h = _HEAD_RE.match(ln)
+        body = re.sub(r"^\s*>\s?", "", ln).strip()
+        if h:
+            flush()
+            out.append((i, h.group(2), True, len(h.group(1))))
+            continue
+        if not body or _ITEM_RE.match(body) or body.startswith("|") or _LABEL_RE.match(body):
+            flush()
+        if body:
+            if not cur:
+                start = i
+            cur.append(body)
+            if body.startswith("|"):
+                flush()
+    flush()
+    return out
+
+
+_QUOTED = re.compile(r"「[^」]*」|“[^”]*”|\"[^\"\n]*\"|『[^』]*』")
+
+
+def _says_read(text: str) -> bool:
+    """这句话是不是在叫 AI 每次都读（引号里提到这几个字的不算 —— 那是在谈论这句话，不是在下指令）。"""
+    return bool(SOFT_LINE.search(_QUOTED.sub("", text)))
+
+
+def _is_label(body: str) -> bool:
+    """一段只有一个小标签（「**新 session 先读：**」「按需读：」）—— 它管下面那几段，不管整节。"""
+    plain = body.replace("*", "").strip()
+    return len(plain) <= 40 and plain.endswith((":", "："))
+
+
+def soft_reads(text: str) -> list:
+    """规则里写着「每个 session 都读 / 开工前先读」的文件：[(行号, 写的路径)]。
+    标题命中 → 整节算，直到同级标题；节里出现「按需读：」这种小标签 → 从那里往下不算；小标签命中 → 从那里往下算。"""
+    out, soft_level, head_level = [], 0.0, 0
+    for line, body, is_head, level in _units(text):
+        if is_head:
+            head_level = level
+            if soft_level and level <= soft_level:
+                soft_level = 0
+            if not soft_level and SOFT_HEAD.search(body) and not SOFT_SKIP.search(body):
+                soft_level = level
+            continue
+        if _is_label(body):
+            if SOFT_SKIP.search(body):
+                soft_level = 0
+            elif SOFT_HEAD.search(body) or _says_read(body) or re.search(r"先读|先看|read first", body, re.I):
+                soft_level = head_level + 0.5
+            continue
+        if not (soft_level or _says_read(body)):
+            continue
+        for clause in _CLAUSE_RE.split(body):           # 「先读 A —— 同步规则：写进 B」：A 算，B 不算
+            if SOFT_SKIP.search(clause) or (not soft_level and not _says_read(clause)):
+                continue
+            for m in _SOFT_PATH.finditer(clause):
+                q = (m.group(1) or m.group(2) or m.group(3) or "").split("#")[0].strip()
+                if q and not re.search(r"[*?<>{}$|]|^[a-z]+://", q, re.I) and ("/" in q or re.search(r"\.(md|mdc|txt)$", q)):
+                    out.append((line, q))
+    return out
+
+
+def _resolve_read(root: Path, from_file: Path, q: str) -> Path | None:
+    """软导入 / @导入写的路径 → 磁盘上的文件。先相对写它的文件，再相对项目根；~ 和绝对路径照写。"""
+    if q.startswith("~"):
+        cands = [Path(q).expanduser()]
+    elif q.startswith("/"):
+        cands = [Path(q)]
+    else:
+        cands = [from_file.parent / q, root / q]
+    for c in cands:
+        try:
+            if c.is_file():
+                return c.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def shown_path(root: Path, p: Path) -> str:
+    try:
+        return p.relative_to(root).as_posix()
+    except ValueError:
+        pass
+    try:
+        return "~/" + p.relative_to(Path.home().resolve()).as_posix()
+    except ValueError:
+        return p.as_posix()
+
+
+def memory_file(root: Path) -> Path:
+    """Claude Code 自动记忆的索引：~/.claude/projects/<项目路径，非字母数字换成 -> /memory/MEMORY.md"""
+    return Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(root)) / "memory" / "MEMORY.md"
+
+
+def load_chain(root, override: dict | None = None, machine: bool = False) -> list:
+    """每次必读链：[Loaded]。override = {绝对路径: 改后的全文}，用来算「这次修改之后」的链。
+    machine=True 再加上这台电脑自己的部分（用户级、上级目录、自动记忆）—— 只给体检看，检查不算它：换台电脑就不一样。"""
+    root = Path(root).resolve()
+    over = {str(Path(k).resolve()): v for k, v in (override or {}).items()}
+    seen: dict = {}
+
+    def text_of(p: Path):
+        k = str(p)
+        if k in over:
+            return over[k]
+        return read_text(p) if p.is_file() else None
+
+    def add(p: Path, how: str, by: str = "", depth: int = 0, text: str | None = None):
+        p = p.resolve()
+        if str(p) in seen:
+            return
+        t = text if text is not None else text_of(p)
+        if t is None:
+            return
+        shown = shown_path(root, p)
+        inside = not (shown.startswith("~/") or shown.startswith("/"))
+        seen[str(p)] = Loaded(shown, how, by, estimate_tokens(t), len(t.encode("utf-8")), not inside)
+        if depth >= IMPORT_DEPTH or how == "memory":
+            return
+        for q in imports_of(t):
+            r = _resolve_read(root, p, q)
+            if r is not None:
+                add(r, "import", shown, depth + 1)
+        for _line, q in soft_reads(t):
+            r = _resolve_read(root, p, q)
+            if r is not None:
+                add(r, "soft", shown, depth + 1)
+
+    if machine:
+        home = Path.home() / ".claude"
+        add(home / "CLAUDE.md", "user")
+        for d in sorted((home / "rules").rglob("*.md")) if (home / "rules").is_dir() else []:
+            if not frontmatter(text_of(d) or "")[1]:
+                add(d, "user")
+        for d in reversed(root.parents):
+            for name in ("CLAUDE.md", "CLAUDE.local.md"):
+                add(d / name, "ancestor")
+    has_claude = any(text_of(root / f) is not None for f in ROOT_CLAUDE)
+    for f in ROOT_CLAUDE + (() if has_claude else ROOT_AGENTS):
+        add(root / f, "root")
+    rules_dir = root / ".claude" / "rules"
+    found = set(str(x.resolve()) for x in rules_dir.rglob("*.md")) if rules_dir.is_dir() else set()
+    found |= {k for k in over if k.startswith(str(rules_dir.resolve()) + os.sep) and k.endswith(".md")}
+    for k in sorted(found):
+        t = text_of(Path(k))
+        if t is not None and not frontmatter(t)[1]:
+            add(Path(k), "rules", text=t)
+    if machine:
+        mem = memory_file(root)
+        t = text_of(mem)
+        if t is not None:
+            head = "\n".join(t.splitlines()[:MEMORY_LINES]).encode("utf-8")[:MEMORY_BYTES].decode("utf-8", "ignore")
+            add(mem, "memory", text=head)
+    return list(seen.values())
+
+
+def chain_tokens(chain: list) -> int:
+    return sum(x.tokens for x in chain)
+
+
+def _budget_parts(chain: list, lang: str) -> str:
+    top = sorted(chain, key=lambda x: -x.tokens)[:6]
+    parts = [f"{x.path} {x.tokens:,}" + (f"（{_t(lang, 'how_soft')}）" if lang == "zh" and x.how == "soft" else
+                                       f" ({_t(lang, 'how_soft')})" if x.how == "soft" else "") for x in top]
+    more = len(chain) - len(top)
+    return " · ".join(parts) + (f" · … +{more}" if more > 0 else "")
+
+
+def _entry(root: Path) -> str:
+    return next((f for f in ROOT_CLAUDE + ROOT_AGENTS if (root / f).is_file()), "CLAUDE.md")
+
+
+def check_budgets(root, doc: dict, only=None) -> list:
+    """整条每次必读链超没超预算。only 给了（Stop 时这次动过的文件），链上的项目内文件都没动就不算。"""
+    root = Path(root).resolve()
+    lang = doc.get("lang", "en")
+    checks = [c for c in doc.get("checks", []) if c.get("enabled", True) and c["type"] == "load_budget"]
+    if not checks:
+        return []
+    chain = load_chain(root)
+    if only is not None:
+        touched = set(only)
+        if not any(x.path in touched for x in chain if not x.outside) and \
+                not any(t.startswith(".claude/rules/") or t in ROOT_CLAUDE for t in touched):
+            return []
+    total = chain_tokens(chain)
+    out = []
+    for c in checks:
+        lim = int(c.get("max_tokens") or 0)
+        if lim and total > lim:
+            msg = _t(lang, "budget", n=total, limit=lim, parts=_budget_parts(chain, lang)) + " " + _t(lang, "budget_fix")
+            out.extend(_stamp(c, [Violation(c["id"], _entry(root), 0, msg)]))
+    return out
+
+
+def in_chain(root, abs_path) -> bool:
+    """这个文件改了会不会改变每次必读链（它在链上，或者它是根规则文件 / .claude/rules 里的文件）。"""
+    root = Path(root).resolve()
+    p = Path(abs_path).resolve()
+    rel = shown_path(root, p)
+    if rel in ROOT_CLAUDE + ROOT_AGENTS or (rel.startswith(".claude/rules/") and rel.endswith(".md")):
+        return True
+    return any(x.path == rel for x in load_chain(root))
+
+
+def check_budget_edit(root, doc: dict, abs_path, before: str, after: str) -> list:
+    """棘轮：链变长、且改完超预算才拦。本来就超的，这次在缩短也放行。"""
+    checks = [c for c in active(doc, "edit") if c["type"] == "load_budget"]
+    if not checks or not in_chain(root, abs_path):
+        return []
+    lang = doc.get("lang", "en")
+    old = load_chain(root, {str(abs_path): before} if before else None)
+    new = load_chain(root, {str(abs_path): after})
+    b, n = chain_tokens(old), chain_tokens(new)
+    out = []
+    for c in checks:
+        lim = int(c.get("max_tokens") or 0)
+        if lim and n > lim and n > b:
+            msg = _t(lang, "budget", n=n, limit=lim, parts=_budget_parts(new, lang))
+            if b > lim:
+                msg += _t(lang, "budget_grows", before=b, n=n)
+            msg += " " + _t(lang, "budget_fix")
+            out.extend(_stamp(c, [Violation(c["id"], shown_path(Path(root).resolve(), Path(abs_path).resolve()), 0, msg)]))
     return out
 
 
@@ -548,7 +907,11 @@ def hook(data: dict, engine_dir: Path | None = None):
 
     if event == "PreToolUse" and tool in ("Write", "Edit"):
         rel = _rel_to(root, ti.get("file_path") or "")
-        if rel is None:
+        if rel is None:                           # 项目外的文件：只有它在每次必读链上（被软导入）才管
+            texts = _edit_texts(root, tool, ti)
+            vs = check_budget_edit(root, doc, ti["file_path"], *texts) if texts else []
+            if vs:
+                return 2, "\n".join([_t(lang, "block_edit"), format_violations(vs, lang), _t(lang, "how")]), ""
             return 0, "", ""
         if any(rel == p or rel.startswith(p) for p in SELF_PATHS):
             return 2, _t(lang, "self"), ""
@@ -568,7 +931,8 @@ def hook(data: dict, engine_dir: Path | None = None):
 
     if event == "Stop":
         vs = check_reply(doc, data.get("last_assistant_message") or "")
-        real, _held = split_baseline(doc, check_project(root, doc, only=changed_files(root)))
+        changed = changed_files(root)
+        real, _held = split_baseline(doc, check_project(root, doc, only=changed) + check_budgets(root, doc, only=changed))
         vs.extend(real)
         for c in active(doc, "stop"):
             if c["type"] == "run_command":
@@ -606,7 +970,7 @@ def _main_check(argv: list) -> int:
     root = Path(a.root) if a.root else (find_root(os.getcwd()) or Path(__file__).resolve().parent.parent)
     doc = load_rules(root)
     lang = doc.get("lang", "en")
-    real, held = split_baseline(doc, check_project(root, doc))
+    real, held = split_baseline(doc, check_project(root, doc) + check_budgets(root, doc))
     if a.run:
         for c in active(doc, "stop"):
             if c["type"] == "run_command":
