@@ -1,6 +1,6 @@
 # send-fuse
 
-**My AI agent emailed a recruiter to "find a time" — for an interview they had already confirmed. Twice.**
+**My AI agent replied to an email with three new times — for a meeting the other side had already confirmed. Twice.**
 send-fuse is the fuse between your agent and the Send button: before anything goes out, it looks at the conversation *as it is now* and blocks the send a careful human wouldn't make.
 
 > Part of [**hands-off**](https://github.com/JohnSUNLei/hands-off) — small, local guards that make it safe to let AI agents act for you.
@@ -26,7 +26,7 @@ This writes `.send-fuse/policy.json`, copies the engine to `.send-fuse/sendfuse.
 When the fuse says no, Claude gets the reason and is told not to work around it:
 
 ```
-send-fuse: BLOCKED  → jordan@northwind.example  “Re: Interview — Data Engineer, Northwind”
+send-fuse: BLOCKED  → jordan@acme.example  “Re: Project kickoff — Acme website redesign”
   ✗ already_settled  Jordan already confirmed this (Nov 17 11:05): “Confirmed — see you
                      Thursday, Nov 20 at 2:00 PM” — proposing times again would undo it.
   ✗ not_latest       You're answering the message of Nov 17 09:12, but 2 newer message(s)

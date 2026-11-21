@@ -21,7 +21,7 @@ Each tool here stops **one specific accident**. One Python file each, standard l
 | | The accident | The guard | |
 |---|---|---|---|
 | 🦷 | You wrote the rule in `CLAUDE.md`. The agent ignored it anyway. | **[rule-teeth](rule-teeth)** turns the checkable rules into hooks that block the edit | [↓](#rule-teeth--rules-that-bite) |
-| ✉️ | Your agent emailed a recruiter to "find a time" — for an interview already confirmed. | **[send-fuse](send-fuse)** reads the live thread before anything is sent | [↓](#send-fuse--a-fuse-before-the-send-button) |
+| ✉️ | Your agent replied with three new times — for a meeting the other side had already confirmed. | **[send-fuse](send-fuse)** reads the live thread before anything is sent | [↓](#send-fuse--a-fuse-before-the-send-button) |
 | 🪤 | One line of white text on a web page can get your agent to send your API key to a stranger. | **[tripwire](tripwire)** — once the agent has read something untrusted, every outbound action needs your OK | [↓](#tripwire--prompt-injection-tripwire) |
 | 📼 | It worked all night. What did it actually do — and how do you undo the one bad step? | **[blackbox](blackbox)** records a plain-language timeline with before/after of every file | [↓](#blackbox--flight-recorder-with-undo) |
 | 🛑 | Stuck on one failing test, it can re-run the same loop until morning — and bill you hundreds of dollars. | **[brake](brake)** stops a task at your dollar / token / time / loop limit, and says why | [↓](#brake--spending-limits-per-task) |
@@ -131,7 +131,7 @@ python3 run_tests.py tripwire   # just one
 
 AI is moving from answering questions to doing things for us. The next step isn't a smarter model — it's being able to take your hands off the keyboard and trust what happens next. These six cover the accidents that showed up first. More will follow as new ones do.
 
-`send-fuse` exists because of a real one: the author's agent emailed a recruiter offering interview times — for an interview that was already booked. Twice.
+`send-fuse` exists because of a real one: the author's agent emailed someone a fresh set of times — for a meeting that was already booked. Twice.
 
 ## Contributing
 

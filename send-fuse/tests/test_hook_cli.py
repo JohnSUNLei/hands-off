@@ -66,7 +66,7 @@ class HookFunction(FuseCase):
         return sf.hook(payload, self.policy(**pol), sf.State(self.state_dir))
 
     def test_incident_denied_with_reason_for_claude(self):
-        code, out, err = self.call(pre("mcp__gmail__reply", {"message_id": "<m1@northwind.example>",
+        code, out, err = self.call(pre("mcp__gmail__reply", {"message_id": "<m1@acme.example>",
                                                              "body": REPLY_WITH_TIMES}, self.tmp))
         kind, reason = decision(out)
         self.assertEqual((code, kind), (0, "deny"))
@@ -148,7 +148,7 @@ class Cli(FuseCase):
     def test_hook_subcommand_end_to_end(self):
         self.write_thread(INCIDENT)
         proj = self.project()
-        payload = pre("mcp__gmail__reply", {"message_id": "<m1@northwind.example>", "body": REPLY_WITH_TIMES}, proj)
+        payload = pre("mcp__gmail__reply", {"message_id": "<m1@acme.example>", "body": REPLY_WITH_TIMES}, proj)
         r = self.run_cli("hook", stdin=json.dumps(payload), env={"SENDFUSE_NOW": WED}, cwd=proj)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(decision(r.stdout)[0], "deny")
@@ -159,8 +159,8 @@ class Cli(FuseCase):
         self.write_thread(INCIDENT)
         proj = self.project()
         env = {"SENDFUSE_NOW": WED}
-        r = self.run_cli("check", "--subject", "Re: Interview — Data Engineer, Northwind", "--body", REPLY_WITH_TIMES,
-                         "--in-reply-to", "<m1@northwind.example>", env=env, cwd=proj)
+        r = self.run_cli("check", "--subject", "Re: Project kickoff — Acme website redesign", "--body", REPLY_WITH_TIMES,
+                         "--in-reply-to", "<m1@acme.example>", env=env, cwd=proj)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("BLOCKED", r.stdout)
         r = self.run_cli("check", "--to", "a@x.example", "--subject", "Hi", "--body", "Hello", "--json", env=env, cwd=proj)
@@ -189,8 +189,8 @@ class Cli(FuseCase):
         self.write_thread(INCIDENT)
         proj = self.project()
         env = {"SENDFUSE_NOW": WED}
-        args = ["check", "--subject", "Re: Interview", "--body", REPLY_WITH_TIMES,
-                "--in-reply-to", "<m1@northwind.example>"]
+        args = ["check", "--subject", "Re: Kickoff", "--body", REPLY_WITH_TIMES,
+                "--in-reply-to", "<m1@acme.example>"]
         self.assertEqual(self.run_cli(*args, env=env, cwd=proj).returncode, 2)
         q = self.run_cli("queue", cwd=proj)
         self.assertIn("#1", q.stdout)

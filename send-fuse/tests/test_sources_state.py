@@ -26,13 +26,13 @@ def mail(mid, frm, to, date, subject, body, refs="", ics=False):
 
 
 INCIDENT_MAILS = [
-    ("<m1@northwind.example>", f"Jordan <{JORDAN}>", ME, "Mon, 17 Nov 2026 09:12:00 -0500",
-     "Interview — Data Engineer", "Could you share a few times for a call?", ""),
+    ("<m1@acme.example>", f"Jordan <{JORDAN}>", ME, "Mon, 17 Nov 2026 09:12:00 -0500",
+     "Project kickoff — Acme", "Could you share a few times for a call?", ""),
     ("<m2@example.com>", f"You <{ME}>", JORDAN, "Mon, 17 Nov 2026 10:30:00 -0500",
-     "Re: Interview — Data Engineer", "Thursday at 2pm would be great.", "<m1@northwind.example>"),
-    ("<m3@northwind.example>", f"Jordan <{JORDAN}>", ME, "Mon, 17 Nov 2026 11:05:00 -0500",
-     "Re: Interview — Data Engineer", "Confirmed - see you Thursday at 2:00 PM.",
-     "<m1@northwind.example> <m2@example.com>"),
+     "Re: Project kickoff — Acme", "Thursday at 2pm would be great.", "<m1@acme.example>"),
+    ("<m3@acme.example>", f"Jordan <{JORDAN}>", ME, "Mon, 17 Nov 2026 11:05:00 -0500",
+     "Re: Project kickoff — Acme", "Confirmed - see you Thursday at 2:00 PM.",
+     "<m1@acme.example> <m2@example.com>"),
     ("<x1@other.example>", "Sam <sam@other.example>", ME, "Mon, 17 Nov 2026 12:00:00 -0500",
      "Unrelated", "Lunch?", ""),
 ]
@@ -48,8 +48,8 @@ class MailboxSources(FuseCase):
         f = sf.Fuse(self.policy(thread_source=source), sf.State(self.state_dir))
         threads = f._source.threads()
         self.assertEqual(sorted(len(t.messages) for t in threads), [1, 3])
-        v = f.evaluate(sf.Outgoing(subject="Re: Interview — Data Engineer", body=REPLY_WITH_TIMES,
-                                   in_reply_to="<m1@northwind.example>"), at=T(WED))
+        v = f.evaluate(sf.Outgoing(subject="Re: Project kickoff — Acme", body=REPLY_WITH_TIMES,
+                                   in_reply_to="<m1@acme.example>"), at=T(WED))
         self.assertEqual([r.rule for r in v.reasons], ["already_settled", "not_latest"])
         self.assertEqual(v.outgoing.to, [JORDAN])
 
@@ -67,7 +67,7 @@ class MailboxSources(FuseCase):
         path = self.tmp / "inbox.mbox"
         self.fill(mailbox.mbox(str(path), create=True))
         src = sf.open_source(self.policy(thread_source={"type": "mbox", "path": str(path)}))
-        m3 = next(m for t in src.threads() for m in t.messages if m.id == "<m3@northwind.example>")
+        m3 = next(m for t in src.threads() for m in t.messages if m.id == "<m3@acme.example>")
         self.assertIn("invite.ics", m3.attachments)
 
 
@@ -81,11 +81,11 @@ class CommandSourceTests(FuseCase):
         src = self.script(f"""
             import json, sys
             out = json.load(sys.stdin)
-            assert out["in_reply_to"] == "<m1@northwind.example>"
+            assert out["in_reply_to"] == "<m1@acme.example>"
             print(json.dumps({json.dumps(sf.DEMO_THREAD)}))
         """)
         v = self.fuse(thread_source=src).evaluate(
-            sf.Outgoing(subject="Re: x", body=REPLY_WITH_TIMES, in_reply_to="<m1@northwind.example>"), at=T(WED))
+            sf.Outgoing(subject="Re: x", body=REPLY_WITH_TIMES, in_reply_to="<m1@acme.example>"), at=T(WED))
         self.assertEqual([r.rule for r in v.reasons], ["already_settled", "not_latest"])
 
     def test_command_null_means_no_thread(self):

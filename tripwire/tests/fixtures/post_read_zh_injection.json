@@ -6,7 +6,7 @@
   "hook_event_name": "PostToolUse",
   "tool_name": "Read",
   "tool_input": {
-    "file_path": "{{HOME}}/Downloads/简历.txt"
+    "file_path": "{{HOME}}/Downloads/报价单.txt"
   },
   "tool_response": {
     "type": "text",

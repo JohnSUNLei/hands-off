@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 import sendfuse as sf  # noqa: E402
 
 ME = "you@example.com"
-JORDAN = "jordan@northwind.example"
+JORDAN = "jordan@acme.example"
 
 INCIDENT = copy.deepcopy(sf.DEMO_THREAD)
 REPLY_WITH_TIMES = sf.DEMO_REPLY
@@ -53,8 +53,8 @@ class FuseCase(unittest.TestCase):
     def fuse(self, **over) -> "sf.Fuse":
         return sf.Fuse(self.policy(**over), sf.State(self.state_dir))
 
-    def reply(self, body=REPLY_WITH_TIMES, in_reply_to="<m1@northwind.example>", **kw) -> "sf.Outgoing":
-        kw.setdefault("subject", "Re: Interview — Data Engineer, Northwind")
+    def reply(self, body=REPLY_WITH_TIMES, in_reply_to="<m1@acme.example>", **kw) -> "sf.Outgoing":
+        kw.setdefault("subject", "Re: Project kickoff — Acme website redesign")
         return sf.Outgoing(body=body, in_reply_to=in_reply_to, via="test", **kw)
 
     def rules(self, verdict) -> list:

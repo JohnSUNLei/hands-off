@@ -208,7 +208,7 @@ def addr_of(raw: str) -> str:
 
 
 def name_of(raw: str) -> str:
-    """'Jordan (Northwind Recruiting) <j@x.com>' → 'Jordan'."""
+    """'Jordan (Acme) <j@x.com>' → 'Jordan'."""
     name, addr = email.utils.parseaddr(raw or "")
     name = re.sub(r"\s*\(.*?\)\s*", " ", name).strip()
     return name or (addr.split("@")[0] if addr else raw)
@@ -1246,18 +1246,18 @@ def cmd_init(a) -> int:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 DEMO_THREAD = {
-    "id": "thread-7731", "subject": "Interview — Data Engineer, Northwind",
+    "id": "thread-7731", "subject": "Project kickoff — Acme website redesign",
     "messages": [
-        {"id": "<m1@northwind.example>", "from": "Jordan (Northwind Recruiting) <jordan@northwind.example>",
+        {"id": "<m1@acme.example>", "from": "Jordan (Acme) <jordan@acme.example>",
          "to": ["you@example.com"], "date": "2026-11-17T09:12:00-05:00",
-         "subject": "Interview — Data Engineer, Northwind",
-         "body": "Hi! Thanks for applying. Could you share a few times for a 45-minute call this week?"},
-        {"id": "<m2@example.com>", "from": "You <you@example.com>", "to": ["jordan@northwind.example"],
-         "date": "2026-11-17T10:30:00-05:00", "subject": "Re: Interview — Data Engineer, Northwind",
+         "subject": "Project kickoff — Acme website redesign",
+         "body": "Hi! Could you share a few times for a 45-minute kickoff call this week?"},
+        {"id": "<m2@example.com>", "from": "You <you@example.com>", "to": ["jordan@acme.example"],
+         "date": "2026-11-17T10:30:00-05:00", "subject": "Re: Project kickoff — Acme website redesign",
          "body": "Thanks Jordan. Thursday at 2pm would be great."},
-        {"id": "<m3@northwind.example>", "from": "Jordan (Northwind Recruiting) <jordan@northwind.example>",
+        {"id": "<m3@acme.example>", "from": "Jordan (Acme) <jordan@acme.example>",
          "to": ["you@example.com"], "date": "2026-11-17T11:05:00-05:00",
-         "subject": "Re: Interview — Data Engineer, Northwind",
+         "subject": "Re: Project kickoff — Acme website redesign",
          "body": "Confirmed — see you Thursday, Nov 20 at 2:00 PM. Calendar invite attached.",
          "attachments": ["invite.ics"]},
     ]}
@@ -1293,10 +1293,10 @@ def cmd_demo(a) -> int:
         _say(c.dim("Two days later the agent re-reads Jordan's first email as if it were new, and drafts:"), p)
         _say(f"  {c.yellow('agent →')} reply to Jordan's 1st email: “{clip(DEMO_REPLY, 60)}”", p)
         _say()
-        _say(f"{c.red('✗ without send-fuse')}  sent. Jordan gets a 2nd scheduling email for an interview")
+        _say(f"{c.red('✗ without send-fuse')}  sent. Jordan gets a 2nd scheduling email for a meeting")
         _say("                      that is already booked. You write “please ignore” by hand.", p)
         _say()
-        out = Outgoing(to=[], subject="Re: " + t.subject, body=DEMO_REPLY, in_reply_to="<m1@northwind.example>",
+        out = Outgoing(to=[], subject="Re: " + t.subject, body=DEMO_REPLY, in_reply_to="<m1@acme.example>",
                        via="agent")
         v = fuse.check(out, at=parse_time("2026-11-19T09:40:00-05:00"), record=True)
         _say(f"{c.green('✓ with send-fuse')}")

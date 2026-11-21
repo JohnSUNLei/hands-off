@@ -10,10 +10,10 @@ T = sf.parse_time
 class Signals(FuseCase):
     def test_confirmations(self):
         yes = ["Confirmed — see you Thursday at 2pm.", "Great, see you then!", "That time works.",
-               "Thursday works for me.", "I've sent a calendar invite.", "The interview is now scheduled.",
+               "Thursday works for me.", "I've sent a calendar invite.", "The meeting is now scheduled.",
                "Looking forward to speaking with you.", "好的，周四下午两点，已确认。", "那就这么定，到时见！"]
         no = ["Could you confirm a time?", "Please confirm your availability.", "This is not confirmed yet.",
-              "The slot is unconfirmed.", "Can you share a few times?", "Thanks for applying."]
+              "The slot is unconfirmed.", "Can you share a few times?", "Thanks for reaching out."]
         for text in yes:
             self.assertTrue(sf.confirmation_in(sf.Message(body=text)), text)
         for text in no:
@@ -22,9 +22,9 @@ class Signals(FuseCase):
     def test_calendar_markers(self):
         self.assertTrue(sf.confirmation_in(sf.Message(body="See attached.", attachments=["invite.ics"])))
         self.assertTrue(sf.confirmation_in(sf.Message(body="", attachments=["text/calendar"])))
-        self.assertTrue(sf.confirmation_in(sf.Message(subject="Invitation: Interview @ Thu 2pm", body="")))
+        self.assertTrue(sf.confirmation_in(sf.Message(subject="Invitation: Kickoff @ Thu 2pm", body="")))
         self.assertTrue(sf.confirmation_in(sf.Message(subject="Accepted: Intro call", body="")))
-        self.assertFalse(sf.confirmation_in(sf.Message(subject="Re: Interview", body="Any update?")))
+        self.assertFalse(sf.confirmation_in(sf.Message(subject="Re: Kickoff", body="Any update?")))
 
     def test_scheduling(self):
         yes = ["Here are three times that work for me", "Are you available on Monday?",
@@ -38,14 +38,14 @@ class Signals(FuseCase):
 
     def test_subject_and_addresses(self):
         self.assertEqual(sf.norm_subject("RE: Fwd: re:  Hello  World"), "hello world")
-        self.assertEqual(sf.norm_subject("回复：面试安排"), "面试安排")
-        self.assertEqual(sf.addr_of("Jordan (Recruiting) <Jordan@X.example>"), "jordan@x.example")
+        self.assertEqual(sf.norm_subject("回复：会议安排"), "会议安排")
+        self.assertEqual(sf.addr_of("Jordan (Acme) <Jordan@X.example>"), "jordan@x.example")
         self.assertEqual(sf.addr_of("#team"), "#team")
-        self.assertEqual(sf.name_of("Jordan (Northwind Recruiting) <j@x.example>"), "Jordan")
+        self.assertEqual(sf.name_of("Jordan (Acme) <j@x.example>"), "Jordan")
 
 
 class TheIncident(FuseCase):
-    """Recruiter confirmed; two days later the agent answers the first email with new times."""
+    """Jordan confirmed; two days later the agent answers the first email with new times."""
 
     def setUp(self):
         super().setUp()
@@ -61,19 +61,19 @@ class TheIncident(FuseCase):
 
     def test_thank_you_on_latest_message_is_fine(self):
         v = self.fuse().evaluate(self.reply(body="Thanks Jordan, see you Thursday!",
-                                            in_reply_to="<m3@northwind.example>"), at=T(WED))
+                                            in_reply_to="<m3@acme.example>"), at=T(WED))
         self.assertEqual(v.decision, "allow", v.explain())
 
     def test_scheduling_blocked_even_when_replying_to_latest(self):
-        v = self.fuse().evaluate(self.reply(in_reply_to="<m3@northwind.example>"), at=T(WED))
+        v = self.fuse().evaluate(self.reply(in_reply_to="<m3@acme.example>"), at=T(WED))
         self.assertEqual(self.rules(v), ["already_settled"])
 
     def test_message_ids_without_brackets(self):
-        v = self.fuse().evaluate(self.reply(in_reply_to="m1@northwind.example"), at=T(WED))
+        v = self.fuse().evaluate(self.reply(in_reply_to="m1@acme.example"), at=T(WED))
         self.assertIn("not_latest", self.rules(v))
 
     def test_found_by_subject_and_recipient(self):
-        v = self.fuse().evaluate(sf.Outgoing(to=[JORDAN], subject="Re: Interview — Data Engineer, Northwind",
+        v = self.fuse().evaluate(sf.Outgoing(to=[JORDAN], subject="Re: Project kickoff — Acme website redesign",
                                              body="Are you available Monday instead?"), at=T(WED))
         self.assertEqual(self.rules(v), ["already_settled"])
 
