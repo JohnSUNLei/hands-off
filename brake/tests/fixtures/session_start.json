@@ -1,0 +1,8 @@
+{
+  "session_id": "runaway-1",
+  "transcript_path": "{{TRANSCRIPT}}",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "SessionStart",
+  "source": "startup"
+}

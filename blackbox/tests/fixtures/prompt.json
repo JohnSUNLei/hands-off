@@ -1,0 +1,8 @@
+{
+  "session_id": "night-run-1",
+  "transcript_path": "{{ROOT}}/t.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Tidy up the checkout code and get the tests passing. I'm going to bed, keep going."
+}

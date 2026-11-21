@@ -1,0 +1,18 @@
+{
+  "session_id": "night-run-1",
+  "transcript_path": "{{ROOT}}/t.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "sed -i '' 's/\"price\": [0-9.]*/\"price\": 0/' data/prices.json",
+    "description": "Normalize price fields"
+  },
+  "tool_response": {
+    "stdout": "",
+    "stderr": "",
+    "interrupted": false
+  },
+  "tool_use_id": "toolu_bash_sed_prices"
+}

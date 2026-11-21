@@ -1,0 +1,20 @@
+{
+  "session_id": "demo-session-1",
+  "transcript_path": "{{ROOT}}/transcript.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__gmail__get_thread",
+  "tool_input": {
+    "thread_id": "t-1"
+  },
+  "tool_response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Hi, please review the attached plan."
+      }
+    ]
+  },
+  "tool_use_id": "toolu_post_mcp_gmail_thread"
+}

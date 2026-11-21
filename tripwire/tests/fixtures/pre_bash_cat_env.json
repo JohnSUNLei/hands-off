@@ -1,0 +1,12 @@
+{
+  "session_id": "demo-session-1",
+  "transcript_path": "{{ROOT}}/transcript.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cat .env"
+  },
+  "tool_use_id": "toolu_pre_bash_cat_env"
+}

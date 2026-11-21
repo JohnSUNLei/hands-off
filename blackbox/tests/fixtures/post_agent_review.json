@@ -1,0 +1,22 @@
+{
+  "session_id": "night-run-1",
+  "transcript_path": "{{ROOT}}/t.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Agent",
+  "tool_input": {
+    "description": "Review the checkout change",
+    "prompt": "Look at src/checkout.py and review.",
+    "subagent_type": "general-purpose"
+  },
+  "tool_response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Looks fine."
+      }
+    ]
+  },
+  "tool_use_id": "toolu_agent_review"
+}

@@ -1,0 +1,13 @@
+{
+  "session_id": "runaway-1",
+  "transcript_path": "{{TRANSCRIPT}}",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "npm test",
+    "description": "Run the tests"
+  },
+  "tool_use_id": "toolu_t"
+}

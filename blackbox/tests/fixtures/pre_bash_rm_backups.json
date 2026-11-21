@@ -1,0 +1,13 @@
+{
+  "session_id": "night-run-1",
+  "transcript_path": "{{ROOT}}/t.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "rm -rf data/backups",
+    "description": "Remove stale backups"
+  },
+  "tool_use_id": "toolu_bash_rm_backups"
+}

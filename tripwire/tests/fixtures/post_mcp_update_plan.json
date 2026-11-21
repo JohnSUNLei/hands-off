@@ -1,0 +1,13 @@
+{
+  "session_id": "demo-session-1",
+  "transcript_path": "{{ROOT}}/transcript.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__ccd_turn__update_plan",
+  "tool_input": {
+    "advance": true
+  },
+  "tool_response": "Plan updated.",
+  "tool_use_id": "toolu_post_mcp_update_plan"
+}

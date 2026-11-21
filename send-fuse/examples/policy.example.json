@@ -1,0 +1,19 @@
+{
+  "me": [
+    "you@example.com"
+  ],
+  "thread_source": {
+    "type": "maildir",
+    "path": "~/Mail/INBOX"
+  },
+  "same_thread_hours": 24,
+  "followup_days": 3,
+  "daily_cap": 20,
+  "quiet_hours": {
+    "start": "21:00",
+    "end": "08:00",
+    "tz": "America/Toronto",
+    "weekends": true
+  },
+  "review": "new_recipient"
+}

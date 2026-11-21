@@ -1,0 +1,15 @@
+{
+  "session_id": "night-run-1",
+  "transcript_path": "{{ROOT}}/t.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "python3 -m pytest -q",
+    "description": "Run the test suite"
+  },
+  "tool_use_id": "toolu_bash_tests_fail",
+  "error": "Exit code 1\n1 failed, 3 passed",
+  "is_interrupt": false
+}

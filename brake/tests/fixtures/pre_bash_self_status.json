@@ -1,0 +1,12 @@
+{
+  "session_id": "runaway-1",
+  "transcript_path": "{{TRANSCRIPT}}",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "python3 .brake/brake.py status"
+  },
+  "tool_use_id": "toolu_s3"
+}

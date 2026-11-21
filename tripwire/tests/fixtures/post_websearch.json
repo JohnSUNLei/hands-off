@@ -1,0 +1,20 @@
+{
+  "session_id": "demo-session-1",
+  "transcript_path": "{{ROOT}}/transcript.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "WebSearch",
+  "tool_input": {
+    "query": "acme cloud pricing"
+  },
+  "tool_response": {
+    "results": [
+      {
+        "title": "Acme pricing",
+        "url": "https://pricing.example/plans"
+      }
+    ]
+  },
+  "tool_use_id": "toolu_post_websearch"
+}

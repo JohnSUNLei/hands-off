@@ -1,0 +1,14 @@
+{
+  "session_id": "runaway-1",
+  "transcript_path": "{{TRANSCRIPT}}",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "{{ROOT}}/.brake/config.json",
+    "old_string": "10",
+    "new_string": "1000"
+  },
+  "tool_use_id": "toolu_s1"
+}

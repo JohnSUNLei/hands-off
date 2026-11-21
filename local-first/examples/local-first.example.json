@@ -1,0 +1,88 @@
+{
+  "listen": "127.0.0.1:8484",
+  "backends": {
+    "lmstudio": {
+      "url": "http://127.0.0.1:1234/v1",
+      "local": true,
+      "model": "",
+      "model_hint": "qwen3.6",
+      "extra": {
+        "reasoning_effort": "none"
+      },
+      "timeout": 600
+    },
+    "ollama": {
+      "url": "http://127.0.0.1:11434/v1",
+      "local": true,
+      "model": "",
+      "model_hint": "",
+      "timeout": 600
+    },
+    "cloud": {
+      "url": "https://api.openai.com/v1",
+      "local": false,
+      "model": "<your cloud model>",
+      "key_env": "OPENAI_API_KEY",
+      "price": {
+        "input_per_mtok": 3.0,
+        "output_per_mtok": 15.0
+      },
+      "timeout": 120
+    }
+  },
+  "routes": [
+    {
+      "name": "private stays here",
+      "when": {
+        "tags": [
+          "private"
+        ]
+      },
+      "to": "lmstudio"
+    },
+    {
+      "name": "asked for the cloud",
+      "when": {
+        "tags": [
+          "cloud"
+        ]
+      },
+      "to": "cloud"
+    },
+    {
+      "name": "hard reasoning",
+      "when": {
+        "task": "reasoning"
+      },
+      "to": "cloud"
+    },
+    {
+      "name": "very long prompt",
+      "when": {
+        "min_tokens": 32000
+      },
+      "to": "cloud"
+    },
+    {
+      "name": "routine work",
+      "when": {
+        "task": [
+          "summarize",
+          "translate",
+          "extract",
+          "classify",
+          "code"
+        ]
+      },
+      "to": "lmstudio"
+    },
+    {
+      "name": "everything else",
+      "to": "lmstudio"
+    }
+  ],
+  "keep_local_tags": [
+    "private"
+  ],
+  "secrets_stay_local": true
+}

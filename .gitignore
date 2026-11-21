@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+# runtime state the tools write into a project
+.rule-teeth/
+.send-fuse/
+.tripwire/
+.blackbox/
+.brake/
+local-first.json
+# promo build outputs (videos are published elsewhere)
+*.mp4
+*.srt

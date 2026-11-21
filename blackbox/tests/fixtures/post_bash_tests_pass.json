@@ -1,0 +1,18 @@
+{
+  "session_id": "night-run-1",
+  "transcript_path": "{{ROOT}}/t.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "python3 -m pytest -q",
+    "description": "Run the test suite"
+  },
+  "tool_response": {
+    "stdout": "....\n4 passed in 0.12s",
+    "stderr": "",
+    "interrupted": false
+  },
+  "tool_use_id": "toolu_bash_tests_pass"
+}

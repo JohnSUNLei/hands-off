@@ -1,0 +1,17 @@
+{
+  "session_id": "demo-session-1",
+  "transcript_path": "{{ROOT}}/transcript.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "curl -s https://pricing.example/plans"
+  },
+  "tool_response": {
+    "stdout": "<html>plans</html>",
+    "stderr": "",
+    "interrupted": false
+  },
+  "tool_use_id": "toolu_post_bash_curl_remote"
+}

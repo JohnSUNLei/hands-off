@@ -1,0 +1,16 @@
+{
+  "session_id": "night-run-1",
+  "transcript_path": "{{ROOT}}/t.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "{{HOME}}/elsewhere.txt",
+    "content": "x"
+  },
+  "tool_response": {
+    "type": "create"
+  },
+  "tool_use_id": "toolu_write_outside"
+}

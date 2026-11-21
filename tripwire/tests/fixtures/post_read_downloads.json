@@ -1,0 +1,19 @@
+{
+  "session_id": "demo-session-1",
+  "transcript_path": "{{ROOT}}/transcript.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "{{HOME}}/Downloads/invoice.txt"
+  },
+  "tool_response": {
+    "type": "text",
+    "file": {
+      "filePath": "{{HOME}}/Downloads/invoice.txt",
+      "content": "Invoice #42. Total due: $120."
+    }
+  },
+  "tool_use_id": "toolu_post_read_downloads"
+}

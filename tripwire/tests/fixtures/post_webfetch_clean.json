@@ -1,0 +1,18 @@
+{
+  "session_id": "demo-session-1",
+  "transcript_path": "{{ROOT}}/transcript.jsonl",
+  "cwd": "{{ROOT}}",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "WebFetch",
+  "tool_input": {
+    "url": "https://docs.example/guide",
+    "prompt": "What does it say?"
+  },
+  "tool_response": {
+    "code": 200,
+    "result": "The guide explains how to configure logging.",
+    "url": "https://docs.example/guide"
+  },
+  "tool_use_id": "toolu_post_webfetch_clean"
+}
