@@ -21,10 +21,24 @@ def imports():
             yield n.module
 
 
+def stdlib_names() -> set:
+    """sys.stdlib_module_names is 3.10+; on 3.9 list the stdlib directory instead (never skip)."""
+    if hasattr(sys, "stdlib_module_names"):
+        return set(sys.stdlib_module_names)
+    import pkgutil
+    import sysconfig
+    std = Path(sysconfig.get_paths()["stdlib"])
+    found = {m.name for m in pkgutil.iter_modules([str(std), str(std / "lib-dynload")])}
+    other_platforms = {"msvcrt", "winreg", "winsound", "_winapi", "nt", "fcntl", "termios", "grp", "pwd", "resource", "posix"}
+    return found | set(sys.builtin_module_names) | other_platforms | {"__future__"}
+
+
+STDLIB = stdlib_names()
+
+
 class Architecture(unittest.TestCase):
-    @unittest.skipUnless(hasattr(sys, "stdlib_module_names"), "needs Python 3.10+ (sys.stdlib_module_names)")
     def test_stdlib_only(self):
-        bad = [m for m in imports() if m.split(".")[0] not in sys.stdlib_module_names]
+        bad = [m for m in imports() if m.split(".")[0] not in STDLIB]
         self.assertEqual(bad, [])
 
     def test_cannot_send_anything_itself(self):
