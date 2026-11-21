@@ -10,7 +10,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python: ["3.9", "3.13"]
+        python: ["3.10", "3.13"]
+        include:
+          # 3.9 is end-of-life and no longer on the latest Ubuntu runners; keep checking it on macOS
+          - os: macos-latest
+            python: "3.9"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

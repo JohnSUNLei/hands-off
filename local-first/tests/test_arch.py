@@ -22,6 +22,7 @@ def imports():
 
 
 class Architecture(unittest.TestCase):
+    @unittest.skipUnless(hasattr(sys, "stdlib_module_names"), "needs Python 3.10+ (sys.stdlib_module_names)")
     def test_stdlib_only(self):
         bad = [m for m in imports() if m.split(".")[0] not in sys.stdlib_module_names]
         self.assertEqual(bad, [])
