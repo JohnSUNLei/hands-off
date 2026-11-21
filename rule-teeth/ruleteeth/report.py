@@ -99,7 +99,11 @@ def describe_check(spec: dict, lang: str) -> str:
     zh = lang == "zh"
     t = spec["type"]
     if t == "max_lines":
-        files = ", ".join(spec.get("files") or [])[:60]
+        globs = spec.get("files") or []
+        if set(globs) == {"*" + e for e in engine.CODE_EXTS}:
+            files = "所有代码文件" if zh else "all code files"
+        else:
+            files = ", ".join(globs)[:60]
         s = (f"≤ {spec['limit']} 行" if zh else f"≤ {spec['limit']} lines")
         if spec.get("max_bytes"):
             s += f" / ≤ {spec['max_bytes'] // 1024}KB"

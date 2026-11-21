@@ -157,5 +157,22 @@ class BudgetHookTest(unittest.TestCase):
             self.assertEqual(res.returncode, 0, res.stderr)
 
 
+
+class WordingTest(unittest.TestCase):
+    def test_one_soft_file_is_singular(self):
+        files = {"CLAUDE.md": "# Rules\n\n## Read every session\n\n- `big.md`\n", "big.md": "Long handbook text. " * 900}
+        with Project(files) as p:
+            title = checkup.run(p.root, lang="en").findings[0].title
+            self.assertIn("1 file (", title)
+            self.assertIn("comes in", title)
+            self.assertNotIn("1 files", title)
+
+    def test_all_code_files_label(self):
+        from ruleteeth import report
+        spec = {"type": "max_lines", "limit": 300, "files": ["*" + e for e in engine.CODE_EXTS]}
+        self.assertEqual(report.describe_check(spec, "zh"), "≤ 300 行（所有代码文件）")
+        self.assertEqual(report.describe_check(spec, "en"), "≤ 300 lines (all code files)")
+
+
 if __name__ == "__main__":
     unittest.main()

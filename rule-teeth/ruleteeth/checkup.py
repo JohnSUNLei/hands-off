@@ -402,8 +402,9 @@ def rank_findings(cu: Checkup) -> list:
                      + (f"，{len(soft)} 个文件是规则里写着「每次都读」带进来的（{soft_t:,}）" if soft else "")
                      if zh else
                      f"Every session reads ~{total_t:,} tokens of rules before doing anything (budget {cu.budget:,}); the "
-                     f"root file is only {root_t:,}" + (f", and {len(soft)} files ({soft_t:,}) come in because the rules "
-                                                        f"say to read them every session" if soft else ""))
+                     f"root file is only {root_t:,}" + (f", and {len(soft)} {_pl(len(soft), 'file', 'files')} ({soft_t:,}) "
+                                                        f"{_pl(len(soft), 'comes', 'come')} in because the rules "
+                                                        f"say to read {_pl(len(soft), 'it', 'them')} every session" if soft else ""))
             out.append(Finding("load_chain", 3 if over_b else 2, title,
                                items=sorted(cu.chain, key=lambda x: -x.tokens)))
     if total and cu.single:
