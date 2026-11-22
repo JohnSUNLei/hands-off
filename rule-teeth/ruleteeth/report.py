@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import datetime as _dt
 
-from . import classify, engine
+from . import classify, engine, refs
 from .checkup import Checkup, rule_status
-from .model import CHECKABLE, JUDGMENT, VAGUE
+from .model import BROKEN, CHECKABLE, JUDGMENT, OK, UNKNOWN, VAGUE, Ref
 
 L = {
     "zh": {
@@ -31,10 +31,15 @@ L = {
         "teeth_note": "装牙：`python3 rule_teeth.py init {path} --hook`。命令类检查（Stop 时跑测试）默认关着，要你在 `.rule-teeth/rules.json` 里亲手打开 —— 工具不会自作主张替你跑命令。",
         "sink": "该下沉的规则（根文件里只服务一个或一部分子项目）", "sink_cols": "| 位置 | 规则 | 为什么 | 建议放到 |",
         "sink_note": "Claude Code 官方的下沉办法：子项目自己的 `CLAUDE.md`（进那个目录干活才加载），或 `.claude/rules/xxx.md` 加 `paths:`（碰到匹配的文件才加载）。",
-        "dead": "找不到的路径（死指针）", "dead_cols": "| 规则文件 | 写的路径 | 磁盘上有吗 |",
-        "dead_note": "「找不到」= 不在 git 跟踪的文件里：新 clone 的人、队友、跑在 worktree 里的 AI 都看不到。磁盘上有、git 里没有的，是被 .gitignore 忽略了或还没提交。",
-        "disk_yes": "有（不在 git 里）", "disk_no": "没有",
-        "ext": "指到仓库外的路径", "ext_cols": "| 规则文件 | 路径 | 这台电脑上有没有 |", "yes": "有", "no": "没有",
+        "refs": "规则验真：点名的路径和命令还在不在", "refs_cols": "| 位置 | 类型 | 写的是 | 结论 | 怎么判的 |",
+        "refs_sum": "共 {n} 个引用：✅ 在 {ok} 个 · ❌ 失效 {broken} 个 · ❓ 未能判断 {unknown} 个（未能判断 ≠ 通过）。下表只列失效和未能判断的。",
+        "refs_note": ("只查不跑：路径看磁盘上在不在（仓库里的相对路径也认 git 里同名的文件）；命令只看程序在不在 PATH 里、"
+                      "点名的脚本 / 目录在不在、package.json / Makefile 里有没有这一项。「不要跑 `x`」里的 x 不查。"
+                      "查的是这台电脑：换台电脑、给别人用，`~/` 开头的那些多半会断。"),
+        "refs_row": "引用的路径 / 命令", "refs_row_v": "{n} 个（失效 {broken}，未能判断 {unknown}）",
+        "kind_path": "路径", "kind_command": "命令",
+        "v": {OK: "✅ 在", BROKEN: "❌ 失效", UNKNOWN: "❓ 未能判断"},
+        "ext": "指到仓库外的路径", "ext_cols": "| 规则文件 | 路径 | 这台电脑上有没有 |",
         "vague_t": "太模糊的规则，以及怎么改写", "vague_cols": "| 位置 | 规则 | 怎么改 |",
         "now": "现在就不符合规则的地方（按规则原文扫）", "now_cols": "| 位置 | 问题 | 规则 |",
         "now_note": "这是按规则字面意思扫的。已经有守卫的子项目，那边可能另有白名单（比如允许某个桥接文件），以那边为准；没有守卫的子项目，这里就是第一次有人查。",
@@ -73,10 +78,16 @@ L = {
         "teeth_note": "Install: `python3 rule_teeth.py init {path} --hook`. Command checks (run tests at Stop) start switched off; you turn them on by hand in `.rule-teeth/rules.json` — the tool never decides on its own to run commands for you.",
         "sink": "Rules that should move down (root file, but serve one or some subprojects)", "sink_cols": "| Where | Rule | Why | Move to |",
         "sink_note": "Claude Code's own ways to move a rule down: the subproject's own `CLAUDE.md` (loads only when working there), or `.claude/rules/xxx.md` with `paths:` (loads only when matching files are touched).",
-        "dead": "Paths that do not exist (dead pointers)", "dead_cols": "| Rule file | Path as written | On disk? |",
-        "dead_note": "\"Not found\" = not among git-tracked files: a fresh clone, a teammate, or an AI running in a worktree cannot see it. On disk but not in git means ignored by .gitignore or never committed.",
-        "disk_yes": "yes (not in git)", "disk_no": "no",
-        "ext": "Pointers outside the repo", "ext_cols": "| Rule file | Path | Exists on this machine |", "yes": "yes", "no": "no",
+        "refs": "Reference check: do the paths and commands the rules name still exist?", "refs_cols": "| Where | Kind | As written | Verdict | How it was judged |",
+        "refs_sum": "{n} references: ✅ {ok} exist · ❌ {broken} broken · ❓ {unknown} could not be judged (not judged ≠ passed). The table lists only broken and not-judged ones.",
+        "refs_note": ("Checked, never run: paths are looked up on disk (repo-relative ones also match a git file of the same name); "
+                      "for commands only the program on PATH, the script / folder they name, and the package.json / Makefile entry "
+                      "are checked. The x in \"don't run `x`\" is skipped. This is this machine: on another machine or for a "
+                      "teammate, the `~/` ones will likely break."),
+        "refs_row": "Paths / commands named", "refs_row_v": "{n} ({broken} broken, {unknown} not judged)",
+        "kind_path": "path", "kind_command": "command",
+        "v": {OK: "✅ exists", BROKEN: "❌ broken", UNKNOWN: "❓ not judged"},
+        "ext": "Pointers outside the repo", "ext_cols": "| Rule file | Path | Exists on this machine |",
         "vague_t": "Vague rules, and how to rewrite them", "vague_cols": "| Where | Rule | How to fix |",
         "now": "Where the rules are broken today (rules as written)", "now_cols": "| Where | Problem | Rule |",
         "now_note": "This scan follows the rules literally. Where a subproject already has its own guard, that guard may have an allow-list (e.g. a bridge file) and wins; where none exists, this is the first time anyone checked.",
@@ -173,7 +184,11 @@ def render(cu: Checkup, name: str = "", quote: bool = True, top: int = 5) -> str
             _row(T["judgment"], len(cu.by(JUDGMENT))),
             _row(T["vague"], len(cu.by(VAGUE))),
             _row(T["checked"], total - unchecked),
-            _row(T["unchecked"], f"**{unchecked}** ({pct}%)"), ""]
+            _row(T["unchecked"], f"**{unchecked}** ({pct}%)")]
+    if not cu.single:
+        n = refs.counts(cu.refs)
+        out.append(_row(T["refs_row"], T["refs_row_v"].format(n=len(cu.refs), broken=n[BROKEN], unknown=n[UNKNOWN])))
+    out.append("")
     for rf in cu.files:
         tag = "auto" if rf.auto_loaded else ("← " + rf.imported_by if rf.imported_by else "")
         out.append(f"- `{rf.path}` {tag}")
@@ -192,11 +207,8 @@ def render(cu: Checkup, name: str = "", quote: bool = True, top: int = 5) -> str
     out += _chain(cu, T)
     out += _teeth(cu, T, quote)
     out += _sink(cu, T, quote)
-    dead = _simple_table(T["dead"], T["dead_cols"],
-                         [(f"`{a}`", f"`{b}`", T["disk_yes"] if disk else T["disk_no"]) for a, b, disk in cu.dead])
-    out += dead + [T["dead_note"], ""] if dead else []
-    out += _simple_table(T["ext"], T["ext_cols"],
-                         [(f"`{a}`", f"`{b}`", T["yes"] if ok else T["no"]) for a, b, ok in cu.external])
+    out += _refs(cu, T)
+    out += _simple_table(T["ext"], T["ext_cols"], [(f"`{a}`", f"`{b}`", T["v"][v]) for a, b, v in cu.external])
     now = _simple_table(T["now"], T["now_cols"],
                         [(f"`{v.file}:{v.line}`", v.msg, f"{v.source}") for v in cu.current[:40]])
     out += now + [T["now_note"], ""] if now else []
@@ -216,7 +228,10 @@ def _finding_examples(f, lang: str, quote: bool) -> list:
     items = f.items[:3]
     lines = []
     for it in items:
-        if isinstance(it, engine.Loaded):
+        if isinstance(it, Ref):
+            lines.append(f"{it.where} `{it.text}` → {L[lang]['v'][it.verdict]}：{refs.explain(it, lang)}" if lang == "zh"
+                         else f"{it.where} `{it.text}` → {L[lang]['v'][it.verdict]}: {refs.explain(it, lang)}")
+        elif isinstance(it, engine.Loaded):
             lines.append(f"`{it.path}` ≈{it.tokens:,} token · {engine._t(lang, 'how_' + it.how)}")
         elif hasattr(it, "cand"):
             extra = "; ".join(describe_check(c, lang) for c in it.checks) if it.checks else (it.hint or "")
@@ -267,6 +282,21 @@ def _teeth(cu: Checkup, T: dict, quote: bool) -> list:
     if not rows:
         return []
     return _simple_table(T["teeth"], T["teeth_cols"], rows) + [T["teeth_note"].format(path="."), ""]
+
+
+def _refs(cu: Checkup, T: dict, limit: int = 80) -> list:
+    if cu.single or not cu.refs:
+        return []
+    n = refs.counts(cu.refs)
+    bad = sorted((r for r in cu.refs if r.verdict != OK), key=lambda r: (r.verdict != BROKEN, r.file, r.line))
+    rows = [(f"`{r.where}`", T["kind_" + r.kind], f"`{r.text.replace('`', 'ˋ').replace('|', '/')}`", T["v"][r.verdict],
+             refs.explain(r, cu.lang).replace("|", "/")) for r in bad[:limit]]
+    out = [f"## {T['refs']}", "", T["refs_sum"].format(n=len(cu.refs), ok=n[OK], broken=n[BROKEN], unknown=n[UNKNOWN]), ""]
+    if rows:
+        out += _simple_table("", T["refs_cols"], rows)[2:]
+        if len(bad) > limit:
+            out += [f"_… +{len(bad) - limit}_", ""]
+    return out + [T["refs_note"], ""]
 
 
 def _sink(cu: Checkup, T: dict, quote: bool) -> list:

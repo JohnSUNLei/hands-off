@@ -55,6 +55,7 @@ class Cli(ProxyCase):
         self.post(chat("Prove this", model="cloud"))
         r = self.run_cli("bill", "--ledger", str(self.ledger.path), "--month", "2026-11")
         self.assertIn("50% of 2 requests ran on this machine", r.stdout)
+        self.assertIn("bill (estimate)", r.stdout)
         r = self.run_cli("bill", "--ledger", str(self.ledger.path), "--month", "2026-11", "--json")
         self.assertEqual(json.loads(r.stdout)["requests"], 2)
         r = self.run_cli("bill", "--ledger", str(self.ledger.path), "--month", "2026-10")
@@ -87,7 +88,8 @@ class Cli(ProxyCase):
     def test_demo(self):
         r = self.run_cli("demo", "--fast", "--color", "never")
         self.assertEqual(r.returncode, 0, r.stderr)
-        for s in ("LOCAL ", "CLOUD ", "KEPT ", "HTTP 503", "cloud requests during the outage: 0", "saved"):
+        for s in ("LOCAL ", "CLOUD ", "KEPT ", "HTTP 503", "cloud requests during the outage: 0",
+                  "bill (estimate)", "you paid (est.)", "saved (est.)"):
             self.assertIn(s, r.stdout)
         strip = lambda t: "\n".join(l for l in t.splitlines() if "127.0.0.1" not in l)  # noqa: E731 — ports vary
         self.assertEqual(strip(r.stdout), strip(self.run_cli("demo", "--fast", "--color", "never").stdout))

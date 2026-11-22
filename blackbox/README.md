@@ -72,7 +72,8 @@ python3 .blackbox/blackbox.py uninstall         # remove our hooks and .blackbox
 ```
 
 Options for `init`: `--lang zh` (Chinese timeline and messages), `--local` (write hooks to `.claude/settings.local.json`).
-Config: `.blackbox/config.json` — `max_file_mb`, `skip_dirs`, `output_chars`, `lang`.
+Config: `.blackbox/config.json` — `max_file_mb`, `skip_dirs`, `skip_files`, `output_chars`, `lang`.
+`skip_files` (e.g. `[".env", ".env.*", "*.pem"]`) keeps secrets out of the record: a change to such a file is noted, its contents are never stored, and `undo` leaves it alone.
 
 The record (`.blackbox/steps.jsonl`, `objects/`) stays on your machine and out of git; only the engine and config are meant to be committed.
 

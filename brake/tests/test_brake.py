@@ -80,6 +80,18 @@ class OtherLimits(unittest.TestCase):
         finally:
             p.cleanup()
 
+    def test_loop_message_names_the_subagent(self):
+        p = Project(init_args=("--usd", "100", "--repeat", "4"))
+        try:
+            p.start()
+            for _ in range(3):
+                self.assertIsNone(p.hook("pre_bash_test", agent_id="a7f3", agent_type="general-purpose"))
+            out = p.hook("pre_bash_test", agent_id="a7f3", agent_type="general-purpose")
+            self.assertTrue(stopped(out))
+            self.assertIn("4 times in the last 4 calls of subagent general-purpose: Bash(npm test)", out["stopReason"])
+        finally:
+            p.cleanup()
+
     def test_minutes(self):
         p = Project(init_args=("--usd", "100", "--minutes", "30", "--repeat", "0"))
         try:
@@ -153,6 +165,54 @@ class OtherLimits(unittest.TestCase):
             self.assertIn("到了单个任务上限 $5.00", out["stopReason"])
         finally:
             p.cleanup()
+
+
+class ParallelAgents(unittest.TestCase):
+    """2026-11-21: seven research subagents started together; each first loaded the same search tools. 0.1.0 counted
+    all of them in one window and stopped the whole task as a "loop". Loops are now counted per `agent_id`."""
+
+    def setUp(self):
+        self.p = Project(init_args=("--usd", "100"))       # default loop rule: 6 identical among the last 12
+        self.p.start()
+
+    def tearDown(self):
+        self.p.cleanup()
+
+    def test_replay_seven_subagents_same_first_call_is_not_a_loop(self):
+        for i in range(7):
+            out = self.p.hook("pre_toolsearch", agent_id=f"a{i:016x}", agent_type="general-purpose")
+            self.assertIsNone(out, f"subagent {i} was stopped: {out}")
+        self.assertIn("loops counted in 7 lanes", self.p.cli("status").stdout)
+
+    def test_without_agent_id_it_stays_as_strict_as_before(self):
+        outs = [self.p.hook("pre_toolsearch") for _ in range(6)]
+        self.assertTrue(all(o is None for o in outs[:5]))
+        self.assertTrue(stopped(outs[5]))
+        self.assertIn("6 times in the last 6 calls: ToolSearch(select:WebSearch,WebFetch)", outs[5]["stopReason"])
+
+    def test_main_agent_and_subagent_are_counted_apart(self):
+        for _ in range(5):
+            self.assertIsNone(self.p.hook("pre_bash_test"))
+        for _ in range(5):
+            self.assertIsNone(self.p.hook("pre_bash_test", agent_id="b1", agent_type="Explore"))
+        self.assertTrue(stopped(self.p.hook("pre_bash_test")))     # the main agent's 6th: still a loop
+
+    def test_a_stop_in_one_lane_stops_the_whole_task(self):
+        for _ in range(6):
+            out = self.p.hook("pre_bash_test", agent_id="c1")
+        self.assertTrue(stopped(out))
+        self.assertTrue(stopped(self.p.hook("pre_read_src")))      # main agent: the task is over until your next message
+        self.p.hook("prompt")
+        self.assertIsNone(self.p.hook("pre_bash_test", agent_id="c1"))   # new task, fresh windows
+
+    def test_state_from_0_1_0_keeps_counting(self):
+        path = next((self.p.root / ".brake" / "state").glob("*.json"))
+        st = json.loads(path.read_text())
+        sig = bk.call_signature("Bash", {"command": "npm test"})
+        st.pop("lanes", None)
+        st["calls"] = [[sig, "Bash(npm test)"]] * 5                  # the old single shared window
+        path.write_text(json.dumps(st))
+        self.assertTrue(stopped(self.p.hook("pre_bash_test")))
 
 
 class Safety(unittest.TestCase):

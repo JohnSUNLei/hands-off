@@ -9,7 +9,8 @@ Per task (everything since your last message) and, optionally, per session, it l
   - estimated cost in dollars   (tokens from the session transcript × a local price table)
   - tokens                      (new tokens: fresh input + cache writes + output)
   - wall-clock minutes
-  - the same tool call repeated (a loop: N identical calls among the last W)
+  - the same tool call repeated (a loop: N identical calls among the last W, counted per agent —
+                                 subagents running in parallel are separate lanes, not one loop)
 
 Before every tool call (PreToolUse) it adds up the task so far. Over a limit → the tool call is denied and
 the agent is told to stop (`continue: false`), with the reason shown to you. At 80% it warns you and tells
@@ -36,7 +37,8 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
+MAX_LANES = 64      # loop windows kept per task (one per agent); the least recently used is dropped first
 HOME_DIR = ".brake"
 ENGINE_FILE = "brake.py"
 CONFIG_FILE = "config.json"
@@ -86,7 +88,9 @@ MSG = {
         "r_usd": "estimated cost {used} reached the {limit} {scope} limit",
         "r_tokens": "{used:,} new tokens reached the {limit:,} {scope} limit",
         "r_minutes": "it has run {used} min, past the {limit}-minute {scope} limit",
-        "r_repeat": "the same call was made {n} times in the last {w} calls: {what}",
+        "r_repeat": "the same call was made {n} times in the last {w} calls{who}: {what}",
+        "who": " of subagent {agent}",
+        "lanes": " · loops counted in {n} lanes",
         "task": "task", "session": "session",
         "line": "This task: ~{usd} · {tok:,} new tokens · {mins} min · {calls} tool calls · since “{prompt}”",
         "line_s": "This session: ~{usd} · {tok:,} new tokens · {mins} min",
@@ -101,7 +105,7 @@ MSG = {
         "self": "brake: the AI may not change or remove its own limits. Ask the user to do it.",
         "status_none": "No sessions recorded yet.",
         "status_head": "Recent sessions (newest first):",
-        "status_row": "- {sid}  task: ~{tusd} · {ttok:,} tok · {tmin} min   session: ~{susd} · {smin} min{tripped}",
+        "status_row": "- {sid}  task: ~{tusd} · {ttok:,} tok · {tmin} min{lanes}   session: ~{susd} · {smin} min{tripped}",
         "tripped": "   ⛔ {why}",
         "limits": "Limits — task: {task}   session: {session}",
         "off": "off",
@@ -117,7 +121,9 @@ MSG = {
         "r_usd": "估算花费 {used}，到了{scope}上限 {limit}",
         "r_tokens": "新 token {used:,} 个，到了{scope}上限 {limit:,}",
         "r_minutes": "已经跑了 {used} 分钟，超过{scope}上限 {limit} 分钟",
-        "r_repeat": "最近 {w} 次调用里，同一个调用出现了 {n} 次：{what}",
+        "r_repeat": "{who}最近 {w} 次调用里，同一个调用出现了 {n} 次：{what}",
+        "who": "子代理 {agent} ",
+        "lanes": " · 死循环分 {n} 路计数",
         "task": "单个任务", "session": "整个会话",
         "line": "本任务：约 {usd} · 新 token {tok:,} · {mins} 分钟 · {calls} 次工具调用 · 起点「{prompt}」",
         "line_s": "本会话：约 {usd} · 新 token {tok:,} · {mins} 分钟",
@@ -130,7 +136,7 @@ MSG = {
         "self": "brake：AI 不能改或删自己的限额。请让用户自己操作。",
         "status_none": "还没有记录任何会话。",
         "status_head": "最近的会话（新的在前）：",
-        "status_row": "- {sid}  任务：约 {tusd} · {ttok:,} tok · {tmin} 分钟   会话：约 {susd} · {smin} 分钟{tripped}",
+        "status_row": "- {sid}  任务：约 {tusd} · {ttok:,} tok · {tmin} 分钟{lanes}   会话：约 {susd} · {smin} 分钟{tripped}",
         "tripped": "   ⛔ {why}",
         "limits": "上限——任务：{task}   会话：{session}",
         "off": "不限",
@@ -419,13 +425,14 @@ def hook(data: dict, engine_path: Path | None = None) -> tuple:
         st = b.load(sid)
         st.setdefault("session_start", now.isoformat())
         st.setdefault("task", {"start": st["session_start"], "prompt": "", "warned": [], "tripped": None})
-        st.setdefault("calls", [])
+        old = st.pop("calls", None)                     # 0.1.0 state: one window shared by every agent
+        st.setdefault("lanes", {"main": old} if old else {})
         out = ""
         if event == "SessionStart":
             if data.get("source") in (None, "startup", "clear"):
                 st["session_start"] = now.isoformat()
                 st["task"] = {"start": now.isoformat(), "prompt": "", "warned": [], "tripped": None}
-                st["calls"] = []
+                st["lanes"] = {}
         elif event == "UserPromptSubmit":
             usage_ok, _err = measure(b, st, data)
             reader = UsageReader(st, b.prices)
@@ -435,7 +442,7 @@ def hook(data: dict, engine_path: Path | None = None) -> tuple:
                 b.save(sid, st)
                 return 0, json.dumps({"decision": "block", "reason": t(lang, "session_block", why=why)}, ensure_ascii=False), ""
             st["task"] = {"start": now.isoformat(), "prompt": _short(data.get("prompt"), 80), "warned": [], "tripped": None}
-            st["calls"] = []
+            st["lanes"] = {}
         elif event == "PreToolUse":
             out = _pre(b, st, data, tool, ti, now)
         b.save(sid, st)
@@ -461,16 +468,25 @@ def _pre(b: Brake, st: dict, data: dict, tool: str, ti: dict, now: _dt.datetime)
         why = task["tripped"]
         return _stop_json("\n".join([t(lang, "stop", why=why), line, t(lang, "how")]),
                           "\n".join([t(lang, "stop", why=why), line, t(lang, "to_ai")]))
-    # loop: record this call first, then look at the window
-    if tool not in (b.cfg.get("loop_exempt") or []):
-        st["calls"].append([call_signature(tool, ti), call_label(tool, ti)])
-        st["calls"] = st["calls"][-int(b.cfg.get("loop_window", 12)):]
+    # loop: one window per agent. Claude Code puts `agent_id` on tool events fired inside a subagent, so
+    # seven subagents each making the same first call are seven lanes with one call each, not a loop.
+    # Without `agent_id` everything counts as the main agent (the 0.1.0 behaviour, never looser).
+    lane = str(data.get("agent_id") or "main")
+    lanes = st["lanes"]
+    calls = lanes.pop(lane, [])
     sig = call_signature(tool, ti)
-    n_same = sum(1 for c in st["calls"] if c[0] == sig)
+    exempt = tool in (b.cfg.get("loop_exempt") or [])
+    if not exempt:
+        calls = (calls + [[sig, call_label(tool, ti)]])[-int(b.cfg.get("loop_window", 12)):]
+    lanes[lane] = calls                                  # re-inserted: the most recently used lane is last
+    while len(lanes) > MAX_LANES:
+        lanes.pop(next(iter(lanes)))
+    n_same = sum(1 for c in calls if c[0] == sig)
     tl = b.cfg.get("task") or {}
     why = over(lang, "task", tl, tusd, ttok, tmin, usage_ok) or over(lang, "session", b.cfg.get("session") or {}, susd, stok, smin, usage_ok)
-    if not why and tl.get("repeat") and tool not in (b.cfg.get("loop_exempt") or []) and n_same >= int(tl["repeat"]):
-        why = t(lang, "r_repeat", n=n_same, w=len(st["calls"]), what=call_label(tool, ti))
+    if not why and tl.get("repeat") and not exempt and n_same >= int(tl["repeat"]):
+        who = t(lang, "who", agent=data.get("agent_type") or lane[:16]) if lane != "main" else ""
+        why = t(lang, "r_repeat", n=n_same, w=len(calls), what=call_label(tool, ti), who=who)
     if why:
         task["tripped"] = why
         user = "\n".join([*notes, t(lang, "stop", why=why), line, t(lang, "how")])
@@ -660,8 +676,10 @@ def cmd_status(b: Brake, limit: int = 8) -> int:
         ttok, tusd = r.totals(t0)
         _stok, susd = r.totals(s0)
         trip = t(lang, "tripped", why=task["tripped"]) if task.get("tripped") else ""
-        print(t(lang, "status_row", sid=p.stem[:8], tusd=money(tusd), ttok=ttok, tmin=_minutes(t0, now), susd=money(susd),
-                smin=_minutes(s0, now), tripped=trip))
+        n_lanes = len(st.get("lanes") or {})
+        lanes = t(lang, "lanes", n=n_lanes) if n_lanes > 1 else ""
+        print(t(lang, "status_row", sid=p.stem[:8], tusd=money(tusd), ttok=ttok, tmin=_minutes(t0, now), lanes=lanes,
+                susd=money(susd), smin=_minutes(s0, now), tripped=trip))
     return 0
 
 

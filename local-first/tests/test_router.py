@@ -131,6 +131,17 @@ class Bill(unittest.TestCase):
         text = lf.format_bill(b, "2026-11")
         for s in ("$2.25", "$6.75", "$4.50 (67%)", "50% of 2 requests", "none were quietly sent"):
             self.assertIn(s, text)
+        # every money line is labelled an estimate, and the bill says what it leaves out
+        for s in ("bill (estimate)", "you paid (est.)", "all-cloud would have cost (est.)", "saved (est.)",
+                  "prices come from your config", "electricity and compute are not counted"):
+            self.assertIn(s, text)
+
+    def test_estimated_token_counts_are_flagged(self):
+        rows = [{"status": "ok", "backend": "cloud", "local": False, "tokens_in": 1000, "tokens_out": 100,
+                 "cost": 0.01, "estimated": True}]
+        text = lf.format_bill(lf.bill(CFG, rows), "2026-11")
+        self.assertIn("* some token counts estimated", text)
+        self.assertNotIn("* some token counts estimated", lf.format_bill(lf.bill(CFG, []), "2026-11"))
 
     def test_empty(self):
         b = lf.bill(CFG, [])

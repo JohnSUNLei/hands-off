@@ -72,7 +72,8 @@ python3 .blackbox/blackbox.py uninstall         # 删掉我们的 hooks 和 .bla
 ```
 
 `init` 选项：`--lang zh`（中文时间线和提示）、`--local`（hooks 写进 `.claude/settings.local.json`）。
-配置：`.blackbox/config.json` —— `max_file_mb`、`skip_dirs`、`output_chars`、`lang`。
+配置：`.blackbox/config.json` —— `max_file_mb`、`skip_dirs`、`skip_files`、`output_chars`、`lang`。
+`skip_files`（比如 `[".env", ".env.*", "*.pem"]`）让密钥文件不进记录：这类文件改了会记一笔，但内容从不保存，`undo` 也不碰它。
 
 记录（`.blackbox/steps.jsonl`、`objects/`）只留在你电脑上、不进 git；只有引擎和配置是要提交的。
 

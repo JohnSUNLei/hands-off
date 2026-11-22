@@ -1,6 +1,6 @@
 # hands-off · 敢放手
 
-**六个小工具，让你敢把活交给 AI，自己走开。**
+**七个小工具，让你敢把活交给 AI，自己走开。**
 
 [![tests](https://github.com/JohnSUNLei/hands-off/actions/workflows/tests.yml/badge.svg)](https://github.com/JohnSUNLei/hands-off/actions/workflows/tests.yml)
 ![license MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -16,7 +16,7 @@ AI 编程助手现在能自己连跑几个小时：读网页、读你的邮箱�
 
 ![tripwire 演示：不装，网页里一行隐藏文字让 AI 把 API 密钥发了出去；装上，密钥还没被读就拦下了](tripwire/promo/tripwire_demo.gif)
 
-## 六个工具
+## 七个工具
 
 | | 事故 | 护栏 | |
 |---|---|---|---|
@@ -25,9 +25,10 @@ AI 编程助手现在能自己连跑几个小时：读网页、读你的邮箱�
 | 🪤 | 网页里一行白色小字，就能让 AI 把你的 API 密钥发给陌生人。 | **[tripwire 注入绊线](tripwire/README.zh.md)**：AI 读过不可信内容之后，每个对外动作都要你点头 | [↓](#tripwire-注入绊线) |
 | 📼 | 它干了一整夜，到底干了什么？坏掉的那一步怎么单独撤回？ | **[blackbox 黑匣子](blackbox/README.zh.md)**：人话时间线，每个文件都留着改前改后 | [↓](#blackbox-黑匣子) |
 | 🛑 | 卡在一个失败的测试上反复重试，一晚上能烧掉几百美元。 | **[brake 刹车](brake/README.zh.md)**：按任务限美元 / token / 时长 / 死循环，超了当场叫停并说明原因 | [↓](#brake-刹车) |
-| 🏠 | 花钱送去云端的活，大部分本机模型就能干。 | **[local-first 本地优先](local-first/README.zh.md)**：按明确规则分流，本机挂了绝不悄悄转去云端 | [↓](#local-first-本地优先路由) |
+| 🏠 | 不知道每个请求去了哪、花了多少；本机一挂，请求还悄悄转去云端，月底才看到账单。 | **[local-first 本地优先](local-first/README.zh.md)**：每个请求去了哪、花了多少都有账；带密钥的留本机，本机挂了报错而不转云 | [↓](#local-first-本地优先路由) |
+| 🔒 | 卡在一个失败的测试上，AI 不去改代码，而是删断言、加 skip、调低及格线——测试变绿了，什么都没修。 | **[bar-lock 及格线锁](bar-lock/README.zh.md)**：读这次改动让检查「变容易」的地方，拦下提交——只有你能放行 | [↓](#bar-lock-及格线锁) |
 
-**先装哪个：** AI 会读网页或邮件 → **tripwire**。AI 替你发消息 → **send-fuse**。晚上让它自己跑 → **brake** + **blackbox**。`CLAUDE.md` 越写越长 → **rule-teeth**。按 token 付费、手上有台不错的 Mac 或显卡 → **local-first**。
+**先装哪个：** AI 会读网页或邮件 → **tripwire**。AI 替你发消息 → **send-fuse**。晚上让它自己跑 → **brake** + **blackbox**。`CLAUDE.md` 越写越长 → **rule-teeth**。按 token 付费、手上有台不错的 Mac 或显卡 → **local-first**。AI 会去「修」失败的测试 → **bar-lock**。
 
 ## 共同的做法
 
@@ -102,7 +103,7 @@ curl -fsSLo .brake/brake.py --create-dirs https://raw.githubusercontent.com/John
 
 ### local-first 本地优先路由
 
-一个 OpenAI 兼容的本地代理：日常活交给本机的 LM Studio / Ollama，难的推理上云，带密钥的内容留在本机。本机模型挂了就明确报错，绝不悄悄转去云端。`bill` 一条命令看你实际付了多少、全走云端要付多少。
+一个 OpenAI 兼容的本地代理：每个请求去了哪、花了多少，你都知道。日常活交给本机的 LM Studio / Ollama，难的推理上云。三条保证：带密钥的内容留在本机；本机挂了明确报错，绝不悄悄转去云端；任何转云都是你配置出来的结果，并写进账单。`bill` 一条命令看本月估算账单——实付多少、全走云端大约要付多少（本机电费和算力不计入）。
 
 ![local-first 演示：日常活在本机跑，难的推理上云，带密钥的提示词留在本机；本机挂了，请求明确报错而不是悄悄转去云端；最后是月度账单](local-first/promo/demo.gif)
 
@@ -111,6 +112,18 @@ curl -fsSL https://raw.githubusercontent.com/JohnSUNLei/hands-off/main/local-fir
 ```
 
 [完整说明 →](local-first/README.zh.md)
+
+### bar-lock 及格线锁
+
+测试一红，AI 可以把代码改对，也可以把检查变容易：删断言、加 skip、放宽容差、吞掉错误、调低及格线。代码检查器看不出来，证据在**改动**里。bar-lock 读改动，拦下提交，也不让 AI 说「做完了」。放行只有你能给，在你自己的终端里；AI 写在 diff 里的豁免不算数。
+
+![bar-lock 演示：没有它，AI 压低五道线把测试刷绿；有它，提交被拦下，AI 只能回头改代码](bar-lock/promo/bar_lock_demo.gif)
+
+```bash
+curl -fsSLo .bar-lock/bar_lock.py --create-dirs https://raw.githubusercontent.com/JohnSUNLei/hands-off/main/bar-lock/bar_lock.py && python3 .bar-lock/bar_lock.py init --lang zh
+```
+
+[完整说明 →](bar-lock/README.zh.md)
 
 ---
 
@@ -123,7 +136,7 @@ python3 run_tests.py tripwire   # 只跑一个
 
 ## 为什么叫「敢放手」
 
-AI 正在从回答问题，走向替我们干活。下一步缺的不是更聪明的模型，而是你敢把手从键盘上拿开，并且信得过接下来发生的事。这六个工具防的是最先冒出来的几种事故，新的事故出现了，就再做新的。
+AI 正在从回答问题，走向替我们干活。下一步缺的不是更聪明的模型，而是你敢把手从键盘上拿开，并且信得过接下来发生的事。这七个工具防的是最先冒出来的几种事故，新的事故出现了，就再做新的。
 
 `send-fuse` 来自一次真事：作者的 AI 替他回邮件，又提了几个时间——可这个时间对方早就确认了。还发了两遍。
 

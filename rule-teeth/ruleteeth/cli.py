@@ -6,6 +6,7 @@
     rule_teeth.py init [项目目录] [--hook]    生成检查；--hook 同时挂进 Claude Code
     rule_teeth.py unhook [项目目录]           把 hook 摘掉
     rule_teeth.py check [项目目录]            按已生成的检查扫一遍
+    rule_teeth.py audit [项目目录]            实测榜：拿本机会话记录重放，哪条规则最常被违反（只读）
 """
 from __future__ import annotations
 
@@ -13,13 +14,15 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import checkup, engine, install, report
+from . import audit, checkup, engine, install, report
 
 HELP = {
     "checkup": "体检：哪些规则从没被检查过、该下沉、根文件超没超 / checkup report (read-only)",
     "init": "把能查的规则变成检查，写进 .rule-teeth/ / turn checkable rules into checks",
     "unhook": "从 .claude/settings.json 摘掉 rule-teeth 的 hook / remove rule-teeth hooks",
     "check": "按 .rule-teeth/rules.json 扫一遍项目 / scan the project with the generated checks",
+    "audit": "实测榜：重放本机 Claude Code 会话记录，哪条规则最常被违反、从没触发、还没装牙（只读）"
+             " / replay local session logs: most-broken, never-fired and toothless rules (read-only)",
 }
 
 
@@ -57,6 +60,17 @@ def _parser() -> argparse.ArgumentParser:
     k = sub.add_parser("check", help=HELP["check"])
     k.add_argument("root", nargs="?", default=".")
     k.add_argument("--run", action="store_true", help="也跑规则要求的命令 / also run required commands")
+
+    a = sub.add_parser("audit", help=HELP["audit"])
+    a.add_argument("root", nargs="?", default=".")
+    a.add_argument("--sessions", action="append", default=[],
+                   help="会话记录目录，可给多个；默认 ~/.claude/projects/<项目路径编码>/ 和它的 worktree / session log folder(s)")
+    a.add_argument("--since", default="", help="只看这天以后的 YYYY-MM-DD / only sessions since this date")
+    a.add_argument("--out", help="写到文件；不给就打印 / write report to this file")
+    a.add_argument("--lang", choices=("zh", "en"), default="")
+    a.add_argument("--name", default="", help="报告标题里的项目名 / project name for the title")
+    a.add_argument("--top", type=int, default=10)
+    a.add_argument("--include", action="append", default=[], help="额外当规则文件读 / extra rule file")
     return ap
 
 
@@ -96,6 +110,27 @@ def _init(a) -> int:
     return 0
 
 
+def _audit(a) -> int:
+    try:
+        au = audit.run(a.root, a.sessions, a.since, a.lang, a.include)
+    except audit.AuditError as e:
+        print(f"rule-teeth audit: {e}", file=sys.stderr)
+        return 2
+    if au.bad_lines:
+        print(f"rule-teeth audit: {au.bad_lines} 行不是合法 JSON，跳过了 / lines skipped (not valid JSON)", file=sys.stderr)
+    for u in au.unreadable:
+        print(f"rule-teeth audit: 读不了 / unreadable: {u}", file=sys.stderr)
+    text = audit.render(au, name=a.name, top=a.top)
+    if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.out).write_text(text + "\n", encoding="utf-8")
+        print(f"→ {a.out}")
+        print(audit.summary(au))
+    else:
+        print(text)
+    return 0
+
+
 def main(argv=None) -> int:
     a = _parser().parse_args(argv)
     if a.cmd == "checkup":
@@ -108,6 +143,8 @@ def main(argv=None) -> int:
         return 0
     if a.cmd == "check":
         return engine.main(["check", a.root] + (["--run"] if a.run else []))
+    if a.cmd == "audit":
+        return _audit(a)
     return 2
 
 

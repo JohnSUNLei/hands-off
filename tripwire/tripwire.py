@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import datetime as _dt
 import fnmatch
+import functools
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -44,6 +46,7 @@ SNIPPET = 110
 LOOPBACK = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"}
 # Permission modes where an "ask" may never reach a human: there we block instead.
 NO_HUMAN_MODES = {"bypassPermissions", "dontAsk"}
+WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 
 DEFAULT_POLICY = {
     "mode": "ask",              # ask = pause and show you; deny = block outright
@@ -55,12 +58,20 @@ DEFAULT_POLICY = {
     "secret_paths": [".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore",
                      "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*", ".netrc", ".npmrc", ".pypirc",
                      ".git-credentials", "credentials", "credentials.json", "secrets.*", "*secret*.json",
-                     ".ssh/", ".aws/", ".gnupg/", ".kube/", ".docker/config.json"],
+                     ".ssh/", ".aws/", ".gnupg/", ".kube/", ".docker/config.json",
+                     ".config/gh/", ".wrangler/", ".azure/", "Library/Keychains/"],
     "protected_paths": [".claude/", "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".mcp.json",
                         ".cursor/", ".git/hooks/", ".git/config", ".github/workflows/", ".gitlab-ci.yml",
                         ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile", ".ssh/",
                         "Library/LaunchAgents/"],
+    # Unlike every other rule these do NOT wait for the session to be tainted: writing them always needs a human.
+    # Same path syntax as protected_paths. Whatever git finds here it will run, the next time anyone commits.
+    "always_protected_paths": [".git/hooks/", ".git/config"],
     "sink_commands": [],        # extra regexes: Bash commands that count as outbound
+    "trusted_send_hosts": [],   # hosts you own (your site, your database): sending to them is not "out"
+    "trusted_commands": [],     # regexes for one piece of a Bash command that sends but you always allow,
+                                # e.g. "^git\\s+push(\\s+-\\S+)*\\s+origin\\b"; secrets and config changes still ask
+    "trusted_upload_paths": [], # files an upload tool may send anywhere, e.g. "~/press-kit/" (same patterns as secret_paths)
 }
 NOT_SECRET_SUFFIX = (".example", ".sample", ".template", ".dist", ".defaults")
 
@@ -79,6 +90,9 @@ MSG = {
         "kind_persist": "changes agent / CI / shell config",
         "kind_change": "changes things in an outside service",
         "ask_tail": "Approve only if YOU asked for this. After review: python3 .tripwire/tripwire.py clear",
+        "always_head": "tripwire: ALWAYS-ON protection. This place is guarded whether or not the session has read "
+                       "anything untrusted, so this action needs your OK.",
+        "always_tail": "Approve only if YOU asked for this. (`clear` does not lift an always-on protection.)",
         "deny_tail": "Blocked (tripwire is in deny mode, or nobody is there to approve). Tell the user what you "
                      "wanted to do and why; they can do it themselves.",
         "self": "tripwire: the AI may not change, clear or switch off its own tripwire. Ask the user to do it "
@@ -115,6 +129,8 @@ MSG = {
         "kind_persist": "改 AI / CI / 终端的配置",
         "kind_change": "改外部服务里的东西",
         "ask_tail": "只有是你自己要它做的才放行。核对完可以清除：python3 .tripwire/tripwire.py clear",
+        "always_head": "tripwire：这是常开保护。这个地方不管会话有没有读过不可信内容都要守，所以下面这个动作要你点头。",
+        "always_tail": "只有是你自己要它做的才放行。（clear 解不开常开保护。）",
         "deny_tail": "已拦下（tripwire 处于禁止模式，或者当前没人能批）。请告诉用户你想做什么、为什么，让用户自己来做。",
         "self": "tripwire：AI 不能改、清除或关掉自己的绊线。请让用户在自己的终端里操作。",
         "post_first": "tripwire：不可信内容进入了本会话（{src}）。之后的对外动作都会先问你。",
@@ -312,6 +328,31 @@ def _host_trusted(host: str, pol: dict) -> bool:
     return False
 
 
+_LOOP_BARE = re.compile(r"(?<![\w.:/-])(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?(?=[/\s'\"]|$)")
+
+
+def _send_hosts(text: str) -> list:
+    """Hosts a command or URL talks to, including bare `localhost:8000` (curl accepts it without a scheme)."""
+    return _hosts(text) + [m.group(1) for m in _LOOP_BARE.finditer(text)]
+
+
+def _host_mine(host: str, pol: dict) -> bool:
+    """Your own machine or a host listed in trusted_send_hosts."""
+    host = host.lower().strip("[]")
+    if host in LOOPBACK or host == "::1":
+        return True
+    for d in pol.get("trusted_send_hosts", []):
+        d = d.lower().lstrip("*.")
+        if host == d or host.endswith("." + d):
+            return True
+    return False
+
+
+def _all_mine(text: str, pol: dict) -> bool:
+    hosts = _send_hosts(text)
+    return bool(hosts) and all(_host_mine(h, pol) for h in hosts)
+
+
 def _mcp_parts(tool: str):
     parts = tool.split("__")
     return (parts[1], "__".join(parts[2:])) if len(parts) >= 3 and parts[0] == "mcp" else (None, None)
@@ -338,9 +379,7 @@ BASH_SEND = (
     _W + r"(?:aws|gsutil|gcloud|az|rclone|s3cmd)" + _E,
     _W + r"(?:sendmail|mailx?|mutt|msmtp|osascript|shortcuts)" + _E,
     _W + r"open\s+['\"]?(?:mailto:|https?:)",
-    _W + r"(?:python3?|node|ruby|perl|php|deno|bun)\b[^\n]*(?:requests\.|urllib|http\.client|socket|fetch\(|axios|"
-         r"net/http|smtplib|XMLHttpRequest|WebSocket)",
-)
+)   # interpreters that open connections (python3 -c "…", heredocs) are checked in _bash_send with _NETLIB
 BASH_SECRET = (
     _W + r"printenv\b",
     r"(?:^|[;&|]\s*)env\s*(?:$|[;&|])",
@@ -355,6 +394,9 @@ BASH_PERSIST = (
     r"\.github/workflows/|\.claude/|CLAUDE\.md|AGENTS\.md|\.ssh/|\.mcp\.json)",
     _W + r"crontab\b",
     _W + r"launchctl\s+(?:load|bootstrap)\b",
+    # pointing a remote somewhere else turns a later, allowed `git push origin` into a leak
+    _W + r"git\s+(?:-[Cc]\s+\S+\s+)*remote\s+(?:add|set-url)\b",
+    _W + r"git\s+(?:-[Cc]\s+\S+\s+)*config\b[^;&|\n]*(?:\bremote\.|\burl\.|insteadOf|pushurl)",
 )
 MCP_CHANGE = re.compile(r"(?:^|_)(?:create|draft|merge|delete|trash|archive|close)(?:$|_)", re.I)
 # MCP tools whose results bring outside content in (matched against the full tool name).
@@ -364,10 +406,20 @@ MCP_SOURCE = re.compile(r"(?i)fetch|brows|navigat|page|web|search|scrap|crawl|ma
 MCP_SEND = re.compile(r"(?:^|_)(?:send|reply|forward|post|publish|comment|upload|share|tweet|push|invite|transfer|pay|"
                       r"submit|form_input|fill|file_upload|type)(?:$|_)", re.I)
 URL_TOOLS = re.compile(r"(?:^|_)(?:navigate|open_url|goto|open|visit)(?:$|_)", re.I)
+UPLOAD_TOOLS = re.compile(r"(?:^|_)(?:file_upload|upload_file|upload|attach)(?:$|_)", re.I)
 SECRET_IN_URL = re.compile(r"(?:sk-[A-Za-z0-9_\-]{8,}|AKIA[0-9A-Z]{12,}|gh[pousr]_[A-Za-z0-9]{12,}|xox[baprs]-|AIza[0-9A-Za-z_\-]{12,}|"
                            r"(?i:api[_-]?key|token|secret|password|passwd|session)=)")
 _BASH_RX = {kind: [re.compile(r) for r in rxs] for kind, rxs in
             (("send", BASH_SEND), ("secret", BASH_SECRET), ("persist", BASH_PERSIST))}
+
+
+def _is_slug(seg: str) -> bool:
+    """A readable article slug such as `how-to-price-your-ai-product`: words joined by - _ +, not an encoded blob."""
+    parts = [p for p in re.split(r"[-_+~]", seg) if p]
+    if len(parts) < 3 or not all(re.fullmatch(r"[A-Za-z]{1,24}|[A-Za-z]{0,2}\d{1,12}", p) for p in parts):
+        return False
+    # ids such as `d704101` or `14000135409` are fine next to words, but mostly-numbers is an encoding
+    return sum(1 for p in parts if re.fullmatch(r"[A-Za-z]{3,24}", p)) * 5 >= len(parts) * 3
 
 
 def url_carries_data(url: str) -> bool:
@@ -381,7 +433,9 @@ def url_carries_data(url: str) -> bool:
     if any(len(v) >= 12 for _, _, v in (kv.partition("=") for kv in query.split("&"))):
         return True
     host = re.match(r"(?i)[a-z]+://([^/?#]*)", url).group(1)
-    return any(len(seg) >= 32 for seg in re.split(r"[/.]", path + "/" + host))
+    if any(len(label) >= 32 for label in host.split(".")):
+        return True
+    return any(len(seg) >= 32 and not _is_slug(seg) for seg in re.split(r"[/.]", path))
 
 
 def _cmd_snip(cmd: str, n: int = 90) -> str:
@@ -389,31 +443,484 @@ def _cmd_snip(cmd: str, n: int = 90) -> str:
     return one if len(one) <= n else one[:n - 1] + "…"
 
 
-def classify_bash(cmd: str, pol: dict, root: Path | None) -> tuple | None:
+# --- reading a shell command a little more like a shell does -----------------------------------
+INTERPRETERS = r"(?:python3?(?:\.\d+)?|node|ruby|perl|php|deno|bun)"
+_HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+_SHELLS = re.compile(r"(?:^|[\s;&|(/])(?:ba|z|da|k)?sh(?=\s|$)")    # bash / sh / /bin/zsh, not notes.sh
+# Code that opens a network connection (not merely mentions a module, e.g. urllib.parse).
+_NETLIB = (r"(?:\bimport\s+(?:requests|urllib\.request|urllib3|http\.client|socket|smtplib|httpx|aiohttp|ftplib)\b|"
+           r"\bfrom\s+(?:requests|urllib\.request|urllib3|http\.client|http|socket|smtplib|httpx|aiohttp)\s+import\b|"
+           r"urllib\.request\.|requests\.(?:get|post|put|patch|delete|head|request|Session)\b|httpx\.\w|"
+           r"socket\.(?:socket|create_connection)\b|smtplib\.SMTP|\bfetch\(|\baxios\b|XMLHttpRequest|new\s+WebSocket|"
+           r"require\(\s*['\"](?:https?|net)['\"]\s*\)|net/http|Net::HTTP|LWP::)")
+_NETLIB_RX = re.compile(_NETLIB)
+# In Python, `fetch(` / `axios` are just names someone chose; only the real network modules count.
+_NETLIB_PY_RX = re.compile(_NETLIB.replace(r"\bfetch\(|\baxios\b|XMLHttpRequest|new\s+WebSocket|", ""))
+_INLINE_NET = re.compile(_W + INTERPRETERS + r"\b[^\n]*" + _NETLIB)
+# `sh -c '…'`, `eval '…'`, `ssh host '…'`: what is inside those quotes is a command, not data.
+_KEEP_QUOTED = re.compile(r"(?:(?<![\w-])(?:ba|z|da|k)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c[a-zA-Z]*|\beval|"
+                          r"\bssh\s+(?:-\S+\s+)*[^\s-]\S*|\bwatch(?:\s+-\S+)*)\s*$")
+# a quoted string that is just one URL ("https://…", "$URL/x", "https://…?v=$(date +%s)"): keep it visible
+_URL_ONLY = re.compile(r"(?i)(?:(?:https?|wss?|ftp|mailto):|\$\{?[A-Za-z_]\w*\}?)(?:\$\([^()]*\)|\S)*")
+
+
+def _python_code_only(src: str) -> str:
+    """Python source with string literals removed, so code that *edits* a file mentioning `requests.post` is not
+    taken for code that calls it. Kept as is when the code runs strings (exec / eval) or does not parse."""
+    if re.search(r"\b(?:exec|eval|compile|__import__)\s*\(", src):
+        return src
+    import io
+    import tokenize
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return src
+    starts, off = [], 0
+    for line in src.splitlines(keepends=True):
+        starts.append(off)
+        off += len(line)
+    starts.append(off)
+    out = list(src)
+    drop = {tokenize.STRING, tokenize.COMMENT, getattr(tokenize, "FSTRING_MIDDLE", tokenize.STRING)}
+    for t in toks:
+        if t.type in drop:
+            a, b = starts[t.start[0] - 1] + t.start[1], starts[t.end[0] - 1] + t.end[1]
+            for k in range(a, min(b, len(out))):
+                if out[k] != "\n":
+                    out[k] = " "
+    return "".join(out)
+
+
+@functools.lru_cache(maxsize=32)
+def _split_heredocs(cmd: str) -> tuple:
+    """(cmd with every here-document body blanked out, [(line that opened it, body)]). Same length as cmd."""
+    out, bodies, pos = list(cmd), [], 0
+    for m in _HEREDOC.finditer(cmd):
+        if m.start() < pos:
+            continue                                          # inside an earlier body
+        nl = cmd.find("\n", m.end())
+        if nl < 0:
+            break
+        end_m = re.compile(r"^[ \t]*" + re.escape(m.group(2)) + r"[ \t]*$", re.M).search(cmd, nl + 1)
+        end = end_m.start() if end_m else len(cmd)
+        bodies.append((cmd[cmd.rfind("\n", 0, m.start()) + 1:m.start()], cmd[nl + 1:end]))
+        for i in range(nl + 1, end):
+            if out[i] != "\n":
+                out[i] = " "
+        pos = end_m.end() if end_m else len(cmd)
+    return "".join(out), bodies
+
+
+@functools.lru_cache(maxsize=32)
+def _mask_quotes(text: str) -> str:
+    """Blank quoted text that is data (grep patterns, messages, code strings) so a word in it is not taken for a
+    command. `$( )` and backticks inside double quotes, `sh -c '…'` bodies and quoted URLs are kept.
+    Same length as the input; unbalanced quotes → returned unchanged (be conservative)."""
+    out, i, n = list(text), 0, len(text)
+
+    def blank(a, b):
+        for k in range(a, b):
+            if out[k] != "\n":
+                out[k] = " "
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c not in "'\"":
+            i += 1
+            continue
+        keep = bool(_KEEP_QUOTED.search(text[:i]))
+        j = i + 1
+        if c == "'":
+            while j < n and text[j] != "'":
+                j += 1
+            if j >= n:
+                return text
+            if not keep and not _URL_ONLY.fullmatch(text[i + 1:j]):
+                blank(i + 1, j)
+        else:
+            depth, tick, run = 0, False, i + 1               # run = start of the current maskable stretch
+            while j < n:
+                ch = text[j]
+                if ch == "\\":
+                    j += 2
+                    continue
+                if not depth and not tick and ch == '"':
+                    break
+                if text.startswith("$(", j) and not tick:
+                    if not depth and not keep:
+                        blank(run, j)
+                    depth += 1
+                    j += 2
+                    continue
+                if ch == ")" and depth:
+                    depth -= 1
+                    run = j + 1
+                elif ch == "`" and not depth:
+                    if not tick and not keep:
+                        blank(run, j)
+                    tick, run = not tick, j + 1
+                j += 1
+            if j >= n:
+                return text
+            if not keep and not depth and not tick and not _URL_ONLY.fullmatch(text[run:j]):
+                blank(run, j)
+        i = j + 1
+    return "".join(out)
+
+
+def _seg_end(masked: str, start: int) -> int:
+    m = re.compile(r"[;&|\n)`]").search(masked, start)
+    return m.start() if m else len(masked)
+
+
+_CURL_DATA = re.compile(
+    r"(?:^|\s)(?:--data(?:-\w+)?|--form(?:-string)?|--upload-file|--json|--user|--cookie|--referer|--url-query|"
+    r"--config|--post-data|--post-file|--body-data|--body-file|--password|--http-password|--proxy-user)(?=[\s=]|$)")
+_CURL_SHORT = re.compile(r"(?:^|\s)-[a-zA-Z]*[dFTubeK][a-zA-Z]*(?=\s|$)")
+_NON_GET = re.compile(r"(?:^|\s)(?:-X\s*|--request[\s=]+|--method[\s=]+)['\"]?(?!(?:GET|HEAD)\b)[A-Za-z]")
+_HEADER = re.compile(r"(?:^|\s)(?:-H|--header)[\s=]*(?:'([^']*)'|\"([^\"]*)\"|(\S+))")
+
+
+# Options whose value is a local file name, a number or a label: never a destination, never data that leaves.
+_FETCH_VALUE_OPTS = {
+    "curl": {"-o", "--output", "-w", "--write-out", "-A", "--user-agent", "-m", "--max-time", "--connect-timeout",
+             "-r", "--range", "--retry", "--retry-delay", "--retry-max-time", "-C", "--continue-at", "--limit-rate",
+             "-c", "--cookie-jar", "-y", "--speed-time", "-Y", "--speed-limit", "--max-filesize", "--cacert",
+             "--max-redirs", "-H", "--header", "-X", "--request", "--resolve", "--dns-servers", "--interface"},
+    "wget": {"-O", "--output-document", "-o", "--output-file", "-a", "--append-output", "-P", "--directory-prefix",
+             "-U", "--user-agent", "-T", "--timeout", "-t", "--tries", "-w", "--wait", "--header", "--method",
+             "--max-redirect", "-Q", "--quota", "--limit-rate"},
+}
+_REDIRECT = re.compile(r"^\d*(?:>>?|<|&>)")
+
+
+def _shell_vars(cmd: str) -> dict:
+    """Literal values a command gives its own variables: `B=http://…` and `for u in 'https://a' 'https://b'; do`.
+    Only values with no `$` in them, so nothing outside the command text can sneak in."""
+    out: dict = {}
+    for m in re.finditer(r"(?:^|[\s;&|(])([A-Za-z_]\w*)=(\"[^\"$`]*\"|'[^']*'|[^\s;&|$`'\"]+)", cmd):
+        out.setdefault(m.group(1), []).append(m.group(2).strip("'\""))
+    for m in re.finditer(r"\bfor\s+([A-Za-z_]\w*)\s+in\s+([^;\n]*?)\s*(?:;|\n)\s*do\b", cmd):
+        try:
+            words = shlex.split(m.group(2))
+        except ValueError:
+            continue
+        if words and not any(re.search(r"[$`*?]", w) for w in words):
+            out.setdefault(m.group(1), []).extend(words)
+    return out
+
+
+def _expand(token: str, svars: dict) -> list | None:
+    """Every value `token` can take given svars, or None if it uses a variable we cannot see."""
+    names = re.findall(r"\$\{?([A-Za-z_]\w*)\}?", token)
+    if re.search(r"\$\(|`", token) or any(n not in svars for n in names):
+        return None
+    vals = [token]
+    for n in dict.fromkeys(names):
+        vals = [re.sub(r"\$\{?" + n + r"\}?(?!\w)", lambda _m, v=v: v, t) for t in vals for v in svars[n]][:64]
+    return vals
+
+
+def _plain_fetch(seg: str, client: str, cmd: str = "") -> bool:
+    """curl / wget that only downloads: no body, no upload, no credentials or cookies, destinations we can read
+    (literal URLs, or variables the command itself sets to literal URLs) that carry no data. Same rule WebFetch gets."""
+    if re.search(r"(?:^|[\s=])@\S", seg) or _CURL_DATA.search(seg) or _NON_GET.search(seg) or \
+            (client == "curl" and _CURL_SHORT.search(seg)) or (client == "wget" and re.search(r"\s-e\s", seg)):
+        return False
+    for h in _HEADER.finditer(seg):
+        v = next(g for g in h.groups() if g is not None)
+        if "$" in v or "`" in v or re.search(r"(?i)authori[sz]ation|api[-_]?key|token|cookie|secret|session|password", v) \
+                or re.search(r"[A-Za-z0-9+/=_-]{24,}", v):
+            return False
+    body = re.sub(r"^.*?\b" + client + r"\b", "", seg, count=1, flags=re.S)
+    try:
+        toks = shlex.split(body)
+    except ValueError:
+        return False
+    svars, urls, skip = _shell_vars(cmd), [], False
+    for tok in toks:
+        if skip:
+            skip = False
+            continue
+        if _REDIRECT.match(tok):
+            skip = tok in (">", ">>", "<", "2>", "&>", "1>")
+            continue
+        if tok.startswith("-"):
+            skip = tok in _FETCH_VALUE_OPTS[client]
+            continue
+        vals = _expand(tok, svars)
+        if vals is None:
+            return False                                      # a destination we cannot read
+        for v in vals:
+            if not re.match(r"(?i)(?:https?|ftp)://", v):
+                return False                                  # `curl example.com` and the like: unclear, ask
+            urls.append(v)
+    return bool(urls) and not any(url_carries_data(u) for u in urls)
+
+
+def _gh_read_only(seg: str) -> bool:
+    m = re.search(r"\bgh\s+api\s+(?:-\S+\s+(?:\S+\s+)?)*?['\"]?([A-Za-z0-9_./{}:-]+)", seg)
+    if not m or re.search(r"\s--input\b", seg) or _NON_GET.search(seg):
+        return False
+    if m.group(1) == "graphql":
+        return "mutation" not in seg.lower()
+    explicit_get = re.search(r"(?:-X\s*|--method[\s=]+)['\"]?GET\b", seg)
+    return bool(explicit_get) or not re.search(r"\s(?:-f|-F|--field|--raw-field)(?=[\s=])", seg)
+
+
+_CMD_PREFIX = re.compile(r"^(?:[\s;&|(`'\"]|\$\(|(?:sudo|xargs|time|exec|nohup|then|do)\s)+")
+
+
+def _dest_mine(masked_seg: str, cmd: str, pol: dict) -> bool:
+    """Every place this piece of command talks to is yours. Read from the unquoted / URL-only parts, so a URL that
+    is merely mentioned inside the data being posted does not count as a destination."""
+    s = _CMD_PREFIX.sub("", masked_seg)
+    s = re.sub(r"\$\([^()]*\)", "_", s)              # command output inside a path does not change the host
+    svars = _shell_vars(cmd)
+
+    def keep_or_blank(m):                            # an unknown variable only matters where a host would be
+        at_host = s[max(0, m.start() - 3):m.start()] == "://" or m.start() == 0 or s[m.start() - 1] in " \t'\"="
+        return m.group(0) if m.group(1) in svars or at_host else "_"
+    s = re.sub(r"\$\{?([A-Za-z_]\w*)\}?", keep_or_blank, s)
+    variants = _expand(s, svars) if "$" in s else [s]
+    return bool(variants) and all(_all_mine(v, pol) for v in variants)
+
+
+def _send_allowed(i: int, match: str, seg: str, masked_seg: str, cmd: str, pol: dict) -> bool:
+    """A send rule matched this piece of the command; is it in fact harmless or allowed by your policy?"""
+    piece = _CMD_PREFIX.sub("", seg).strip()
+    if any(re.search(p, piece) for p in pol.get("trusted_commands", [])):
+        return True
+    if i == 0:                                                # network clients
+        if _dest_mine(masked_seg, cmd, pol):
+            return True                                       # your own machine / your own hosts
+        client = re.search(r"\b(curl|wget)\b", match)
+        return bool(client) and _plain_fetch(seg, client.group(1), cmd)
+    if i == 1:                                                # git push
+        return bool(re.search(r"\bpush(?:\s+-\S+)*\s+\.(?:\s|$)", seg))      # `git push .` stays on this disk
+    if i == 2:                                                # gh
+        return _gh_read_only(seg)
+    return False
+
+
+def _bash_send(cmd: str, pol: dict, root: Path | None, depth: int) -> bool:
+    shell, bodies = _split_heredocs(cmd)
+    masked = _mask_quotes(shell)
+    for i, rx in enumerate(_BASH_RX["send"]):
+        for m in rx.finditer(masked):
+            end = _seg_end(masked, m.end())
+            if not _send_allowed(i, m.group(0), shell[m.start():end], masked[m.start():end], shell, pol):
+                return True
+    for line in shell.splitlines():                           # `python3 -c "…urllib…"` on one line
+        if _INLINE_NET.search(line) and not _all_mine(line, pol):
+            return True
+    for head, body in bodies:
+        if _SHELLS.search(head) and depth < 3:                # `bash <<EOF … EOF`: the body is shell
+            if classify_bash(body, pol, root, depth + 1):
+                return True
+            continue
+        interp = re.search(r"\b" + INTERPRETERS + r"\b", head)
+        if not interp:
+            continue                                          # `cat > f <<EOF`: the body is data
+        is_py = interp.group(0).startswith("python")
+        code = _python_code_only(body) if is_py else body
+        if (_NETLIB_PY_RX if is_py else _NETLIB_RX).search(code) and not _all_mine(body, pol):
+            return True
+    return any(re.search(r, cmd) for r in pol["sink_commands"])
+
+
+# --- git config: keys that make git run a command later --------------------------------------------
+# Setting one of these turns a harmless-looking `git commit` / `git log` / `git push` into code execution.
+# (git treats section and variable names case-insensitively, so this does too.)
+GIT_EXEC_KEY = re.compile(r"(?i)^(?:core\.(?:hookspath|fsmonitor|sshcommand|pager|editor)|credential\.(?:.*\.)?helper|"
+                          r"alias\..+|diff\.external|filter\..+)$")
+_GIT_CONFIG = re.compile(_W + r"git\s+(?:-[Cc]\s+\S+\s+|--?\S+\s+)*config" + _E, re.M)
+_GC_READ_FLAGS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool",
+                  "--list", "-l", "--unset", "--unset-all", "--remove-section", "--rename-section"}
+_GC_VALUE_FLAGS = {"-f", "--file", "--blob", "--type", "--default", "--comment"}     # the next word is theirs
+_GC_READ_SUBCMDS = {"get", "list", "unset", "edit", "remove-section", "rename-section"}
+_REDIR_TOKEN = re.compile(r"\d*(?:>>?|<|&>>?)")
+
+
+def _git_config_sets_exec_key(cmd: str) -> bool:
+    """`git config [--global|--local|--system|--file f] KEY VALUE` where KEY is one of GIT_EXEC_KEY.
+    Reading one (`git config core.hooksPath`, `--get`, `--list`, `--unset`) is fine."""
+    if "config" not in cmd:
+        return False
+    shell = _split_heredocs(cmd)[0]
+    masked = _mask_quotes(shell)
+    for m in _GIT_CONFIG.finditer(masked):
+        seg = shell[m.end():_seg_end(masked, m.end())]
+        try:
+            toks = shlex.split(seg)
+        except ValueError:
+            toks = re.findall(r"[^\s'\"]+", seg)
+        pos, skip, read = [], False, False
+        for tok in toks:
+            if skip:
+                skip = False
+            elif _REDIR_TOKEN.fullmatch(tok):
+                skip = True                                   # `> file`: the file is not an argument
+            elif re.match(r"\d*(?:>>?|<|&>>?)\S", tok):
+                continue                                      # `2>&1`, `2>/dev/null`
+            elif tok.startswith("-") and len(tok) > 1:
+                name = tok.split("=", 1)[0]
+                read = read or name in _GC_READ_FLAGS
+                skip = name in _GC_VALUE_FLAGS and "=" not in tok
+            else:
+                pos.append(tok)
+        if read or not pos:
+            continue
+        if pos[0] in _GC_READ_SUBCMDS:
+            continue
+        if pos[0] == "set":                                   # git >= 2.46: `git config set KEY VALUE`
+            pos = pos[1:]
+        if len(pos) >= 2 and GIT_EXEC_KEY.match(pos[0]):
+            return True
+    return False
+
+
+# --- always-on protection: writes to always_protected_paths ----------------------------------------
+_PV = r"\\?(?:[\w.+~-]*/)*"                       # `cp`, `\cp`, `/bin/cp`
+_WRITE_VERBS = (                                  # (which words are written to, regex on the masked command)
+    ("any", re.compile(_W + _PV + r"(?:tee|chmod|chown|mv)" + _E, re.M)),
+    ("dest", re.compile(_W + _PV + r"(?:cp|ln|install)" + _E, re.M)),
+    ("any", re.compile(_W + _PV + r"sed\s+(?:\S+\s+)*?(?:-[A-Za-z]*i\S*|--in-place\S*)" + _E, re.M)),
+)
+_REDIR_OUT = re.compile(r"(?:&>>?|\d*>>?\|?)(?![&>])\s*")
+_REDIR_TARGET = re.compile(r"['\"]?([^\s'\"<>;&|()`]+)")
+_CD_INTO = re.compile(_W + r"(?:cd|pushd)\s+(?:--\s+)?(?=\S)", re.M)       # run on the masked command
+_WRITE_HINT = re.compile(r">|\b(?:tee|chmod|chown|mv|cp|ln|install|sed)\b")      # cheap test before the careful one
+_TARGET_DIR = re.compile(r"(?:^|\s)(?:-[A-Za-z]*t|--target-directory)(?=[\s=]|$)")
+
+
+def _cmd_path(word: str) -> str:
+    return re.sub(r"^\$\{?HOME\}?", "~", word)
+
+
+def _cmd_words(seg: str) -> list:
+    """The file-ish words of one piece of a command: no options, no redirections."""
+    seg = re.sub(r"(?:&|\d*)[<>]+&?\s*\S*", " ", seg)
+    return [_cmd_path(w) for w in re.findall(r"[^\s'\"=;&|()<>`]+", seg) if not w.startswith("-")]
+
+
+def _bash_writes_paths(cmd: str, patterns, root: Path | None) -> bool:
+    """Does this command write (`>`, `>>`, tee, cp, mv, ln, install, chmod, sed -i) somewhere matching `patterns`?
+    After `cd <protected dir>` any write counts, since the paths after it are relative."""
+    if not _WRITE_HINT.search(cmd):
+        return False
+    shell = _split_heredocs(cmd)[0]
+    masked = _mask_quotes(shell)
+
+    def hit(w: str) -> bool:
+        return path_matches(_cmd_path(w), patterns, root)
+    # `cd .git` is as good as `cd .git/hooks`: the paths that follow are relative to a protected parent
+    parents = [q.rstrip("/").rsplit("/", 1)[0] + "/" for q in patterns
+               if "/" in q.rstrip("/") and not re.search(r"[*?\[]", q)]
+    in_dir = False
+    for m in _CD_INTO.finditer(masked):
+        tgt = _REDIR_TARGET.match(shell, m.end())
+        in_dir = in_dir or bool(tgt and (hit(tgt.group(1)) or path_matches(_cmd_path(tgt.group(1)), parents, root)))
+    for m in _REDIR_OUT.finditer(masked):
+        tgt = _REDIR_TARGET.match(shell, m.end())
+        if tgt and (hit(tgt.group(1)) or (in_dir and not tgt.group(1).startswith("/dev/"))):
+            return True
+    for how, rx in _WRITE_VERBS:
+        for m in rx.finditer(masked):
+            seg = shell[m.end():_seg_end(masked, m.end())]
+            words = _cmd_words(seg)
+            if how == "dest" and not _TARGET_DIR.search(seg):
+                words = words[-1:]                    # `cp SRC DEST`: reading a protected file is not writing it
+            if in_dir or any(hit(w) for w in words):
+                return True
+    return False
+
+
+def classify_bash(cmd: str, pol: dict, root: Path | None, depth: int = 0) -> tuple | None:
     if not cmd.strip():
         return None
+    if _git_config_sets_exec_key(cmd):
+        return "persist", f"Bash `{_cmd_snip(cmd)}`"
+    shell = _split_heredocs(cmd)[0]           # a here-document fed to cat is data; one fed to bash is checked below
     for kind in ("persist", "secret"):
         for rx in _BASH_RX[kind]:
-            if rx.search(cmd):
+            if rx.search(shell if kind == "persist" else cmd):
                 return kind, f"Bash `{_cmd_snip(cmd)}`"
     for word in re.findall(r"[^\s'\"=;&|()<>`]+", cmd):
         if len(word) > 2 and not word.startswith("-") and is_secret_path(word, pol, root):
             return "secret", f"Bash `{_cmd_snip(cmd)}`"
-    rxs = _BASH_RX["send"] + [re.compile(r) for r in pol["sink_commands"]]
-    for rx in rxs:
-        m = rx.search(cmd)
-        if not m:
-            continue
-        if rx is _BASH_RX["send"][0]:
-            hosts = _hosts(cmd)
-            if hosts and all(h.strip("[]") in LOOPBACK for h in hosts):
-                continue                                      # talking to your own machine is not "out"
+    if _bash_send(cmd, pol, root, depth):
         return "send", f"Bash `{_cmd_snip(cmd)}`"
     return None
 
 
-def classify_sink(tool: str, ti: dict, pol: dict, root: Path | None) -> tuple | None:
-    """(kind, what) if this action could leak or persist something; None if it is harmless."""
+# MCP tools that read or write local files, recognised by name, and the argument names that carry a path.
+MCP_FILE_WRITE = re.compile(r"(?i)write|edit|move|append|copy|create_file|delete")
+MCP_FILE_READ = re.compile(r"(?i)read|search|list|get_file|directory")
+MCP_PATH_FIELDS = ("path", "paths", "file_path", "source", "destination", "dest", "directory")
+
+
+def _mcp_paths(ti: dict) -> list:
+    out = []
+    for key in MCP_PATH_FIELDS:
+        val = ti.get(key)
+        out += [str(v) for v in (val if isinstance(val, list) else [val]) if isinstance(v, str) and v]
+    return out
+
+
+def _mcp_file_sink(tool: str, name: str, ti: dict, pol: dict, root: Path | None) -> tuple | None:
+    """A file MCP tool aimed at a protected place (write) or a secret (read): the same rules Write / Read get."""
+    paths = _mcp_paths(ti)
+    if not paths:
+        return None
+    if MCP_FILE_WRITE.search(name):
+        for p in paths:
+            if path_matches(p, pol["protected_paths"], root):
+                return "persist", f"{tool} {show_path(p, root)}"
+    elif MCP_FILE_READ.search(name):
+        for p in paths:
+            if is_secret_path(p, pol, root):
+                return "secret", f"{tool} {show_path(p, root)}"
+    return None
+
+
+def _always_bash(cmd: str, pats, root: Path | None, depth: int = 0) -> bool:
+    if _git_config_sets_exec_key(cmd) or (pats and _bash_writes_paths(cmd, pats, root)):
+        return True
+    if depth < 3:                                             # `bash <<EOF … EOF`: the body is shell
+        return any(_SHELLS.search(head) and _always_bash(body, pats, root, depth + 1)
+                   for head, body in _split_heredocs(cmd)[1])
+    return False
+
+
+def classify_always(tool: str, ti: dict, pol: dict, root: Path | None) -> tuple | None:
+    """(kind, what) for the few actions that need a human even in a clean session: writing git hooks / git config
+    (policy `always_protected_paths`) and `git config` calls that make git run a command."""
+    pats = pol.get("always_protected_paths") or []
+    if tool in ("Bash", "PowerShell"):
+        cmd = str(ti.get("command") or "")
+        if cmd.strip() and _always_bash(cmd, pats, root):
+            return "persist", f"Bash `{_cmd_snip(cmd)}`"
+        return None
+    if tool in WRITE_TOOLS:
+        path = str(ti.get("file_path") or ti.get("notebook_path") or "")
+        if path and pats and path_matches(path, pats, root):
+            return "persist", f"{tool} {show_path(path, root)}"
+        return None
+    server, name = _mcp_parts(tool)
+    if server is None or _mcp_trusted(tool, pol) or not pats or not MCP_FILE_WRITE.search(name):
+        return None
+    for p in _mcp_paths(ti):
+        if path_matches(p, pats, root):
+            return "persist", f"{tool} {show_path(p, root)}"
+    return None
+
+
+def classify_sink(tool: str, ti: dict, pol: dict, root: Path | None, mcp_files: bool = True) -> tuple | None:
+    """(kind, what) if this action could leak or persist something; None if it is harmless.
+    mcp_files=False leaves out the file-path rules for MCP tools (taint_origin asks without them)."""
     if tool in ("Bash", "PowerShell"):
         return classify_bash(str(ti.get("command") or ""), pol, root)
     if tool in ("Read", "Grep"):
@@ -430,18 +937,27 @@ def classify_sink(tool: str, ti: dict, pol: dict, root: Path | None) -> tuple | 
         return None
     if tool == "WebFetch":
         url = str(ti.get("url") or "")
-        if url and url_carries_data(url) and not any(_host_trusted(h, pol) for h in _hosts(url)):
+        if url and url_carries_data(url) and not any(_host_trusted(h, pol) or _host_mine(h, pol) for h in _hosts(url)):
             return "send", f"WebFetch {url}"
         return None
     server, name = _mcp_parts(tool)
     if server is None or _mcp_trusted(tool, pol):
         return None
+    if UPLOAD_TOOLS.search(name) and pol.get("trusted_upload_paths"):
+        files = ti.get("paths") or ti.get("files") or ti.get("file_path") or ti.get("path") or []
+        files = [str(f) for f in (files if isinstance(files, list) else [files]) if f]
+        if files and all(path_matches(f, pol["trusted_upload_paths"], root) for f in files):
+            return None                                       # e.g. your press kit: it is meant to be sent
+    if mcp_files:
+        hit = _mcp_file_sink(tool, name, ti, pol, root)
+        if hit:
+            return hit
     if MCP_SEND.search(name):
         return "send", tool
     if MCP_CHANGE.search(name):
         return "change", tool
     url = str(ti.get("url") or "")
-    if URL_TOOLS.search(name) and url and url_carries_data(url):
+    if URL_TOOLS.search(name) and url and url_carries_data(url) and not _all_mine(url, pol):
         return "send", f"{tool} {url}"
     return None
 
@@ -494,7 +1010,7 @@ def taint_origin(tool: str, ti: dict, pol: dict, root: Path | None) -> str | Non
                 return f"Bash `{_cmd_snip(cmd, 70)}`"
         return None
     server, _ = _mcp_parts(tool)
-    if server is None or _mcp_trusted(tool, pol) or classify_sink(tool, ti, pol, root) is not None:
+    if server is None or _mcp_trusted(tool, pol) or classify_sink(tool, ti, pol, root, mcp_files=False) is not None:
         return None
     if MCP_SOURCE.search(tool) or any(fnmatch.fnmatch(tool, p) for p in pol["untrusted_mcp"]):
         return f"{tool} {ti.get('url') or ''}".strip()
@@ -556,7 +1072,6 @@ def active_taint(events: list) -> list:
 # ---------------------------------------------------------------------------
 READ_ONLY_CLI = re.compile(r"^\s*(?:(?:python3?\s+)?['\"]?\S*\.tripwire/tripwire\.py['\"]?\s+(?:status|scan|log|version|help)\b|"
                            r"(?:cat|less|head|tail|ls|grep|rg|wc)\s)[^;&|`$<>]*$")
-WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 
 
 def touches_self(tool: str, ti: dict, home: Path) -> bool:
@@ -624,18 +1139,20 @@ def hook(data: dict, engine_path: Path | None = None) -> tuple:
             append_event(home, sid, {"ev": "deny", "kind": "self", "tool": tool, "what": _cmd_snip(json.dumps(ti, ensure_ascii=False), 120)})
             return 0, _pre_decision("deny", t(lang, "self"), t(lang, "self")), ""
         taints = active_taint(read_events(home, sid))
-        if not taints:
-            return 0, "", ""
-        sink = classify_sink(tool, ti, pol, root)
+        always = classify_always(tool, ti, pol, root)       # guarded tainted or not
+        sink = always or (classify_sink(tool, ti, pol, root) if taints else None)
         if sink is None:
             return 0, "", ""
         kind, what = sink
         block = pol.get("mode") == "deny" or data.get("permission_mode") in NO_HUMAN_MODES
-        lines = [t(lang, "ask_head"), *_describe(lang, taints),
+        lines = [t(lang, "always_head" if always else "ask_head"), *(_describe(lang, taints) if taints else []),
                  f"  {t(lang, 'now')}:  {what}  → {t(lang, 'kind_' + kind)}",
-                 t(lang, "deny_tail" if block else "ask_tail")]
+                 t(lang, "deny_tail" if block else ("always_tail" if always else "ask_tail"))]
         reason = "\n".join(lines)
-        append_event(home, sid, {"ev": "deny" if block else "ask", "kind": kind, "tool": tool, "what": what})
+        rec = {"ev": "deny" if block else "ask", "kind": kind, "tool": tool, "what": what}
+        if always:
+            rec["always"] = True
+        append_event(home, sid, rec)
         return 0, _pre_decision("deny" if block else "ask", reason, reason if block else None), ""
 
     if event == "PostToolUse":
@@ -742,7 +1259,9 @@ def install(root: Path, lang: str = "en", mode: str = "ask", local: bool = False
     pol_path = home / POLICY_FILE
     if not pol_path.is_file():
         _write_json(pol_path, {"mode": mode, "lang": lang, "trusted_domains": [], "trusted_mcp": [],
-                               "untrusted_mcp": [], "untrusted_paths": [], "secret_paths": [], "protected_paths": [], "sink_commands": []})
+                               "untrusted_mcp": [], "untrusted_paths": [], "secret_paths": [], "protected_paths": [],
+                               "always_protected_paths": [], "sink_commands": [], "trusted_send_hosts": [], "trusted_commands": [],
+                               "trusted_upload_paths": []})
     (home / ".gitignore").write_text(STATE_DIR + "/\n", encoding="utf-8")
     settings = root / ".claude" / ("settings.local.json" if local else "settings.json")
     try:
@@ -824,6 +1343,7 @@ def cmd_log(home: Path, limit: int) -> int:
     for ts, sid, e in sorted(rows, key=lambda r: (r[0], r[1]))[-limit:]:
         what = e.get("src") or e.get("what") or ""
         extra = f"  ⚠{e['n_flags']}" if e.get("n_flags") else ""
+        extra += "  (always-on)" if e.get("always") else ""
         print(f"{ts[:19]}  {sid}  {e.get('ev', '?'):5}  {e.get('kind', ''):7}  {what}{extra}")
     return 0
 

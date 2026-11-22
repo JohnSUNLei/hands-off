@@ -1,8 +1,9 @@
 """End-to-end: replay an overnight agent run through the installed engine, then read the record and undo."""
 import json
 import unittest
+import zlib
 
-from _harness import BACKUPS, CHECKOUT, CHECKOUT_NEW, PRICES, PRICES_ZERO, Project
+from _harness import BACKUPS, CHECKOUT, CHECKOUT_NEW, ENGINE, PRICES, PRICES_ZERO, Project
 
 
 class Recording(unittest.TestCase):
@@ -251,6 +252,46 @@ class Install(unittest.TestCase):
             n = p.step(cmd="sed")["n"]
             self.assertEqual(p.cli("undo", str(n), "--yes").returncode, 0)
             self.assertEqual((p.root / "data/prices.json").read_text(), PRICES)
+        finally:
+            p.cleanup()
+
+    def test_skip_files_and_skip_dirs_keep_secrets_out_of_the_record(self):
+        p = Project(init_args=None)
+        try:
+            secret = "OPENAI_API_KEY=sk-test-do-not-keep-0123456789"
+            (p.root / ".env").write_text(secret + "\n")
+            (p.root / "vendor").mkdir()
+            (p.root / "vendor" / "lib.js").write_text("v1\n")
+            (p.root / ".blackbox").mkdir()
+            (p.root / "secret-santa").mkdir()                       # a name-only pattern must not match folder names
+            (p.root / "secret-santa" / "list.json").write_text('{"gift": "tea"}\n')
+            (p.root / ".blackbox" / "config.json").write_text(json.dumps({"skip_files": [".env", "*.pem", "*secret*.json"],
+                                                                          "skip_dirs": ["vendor"]}))
+            r = p.cli("init", str(p.root), engine=ENGINE)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            root = str(p.root)
+            # an Edit to .env and to a file in a skipped folder, then a shell command that rewrites .env
+            p.hook("pre_write_notes", tool_input={"file_path": root + "/.env", "content": "x"})
+            (p.root / ".env").write_text(secret + "\nNEW_KEY=sk-test-new-also-not-kept\n")
+            p.hook("post_write_notes", tool_input={"file_path": root + "/.env", "content": "x"})
+            p.hook("pre_edit_checkout", tool_input={"file_path": root + "/vendor/lib.js", "old_string": "v1", "new_string": "v2"})
+            (p.root / "vendor" / "lib.js").write_text("v2\n")
+            p.hook("post_edit_checkout", tool_input={"file_path": root + "/vendor/lib.js", "old_string": "v1", "new_string": "v2"})
+            p.tool("bash_sed_prices", lambda r: (r / ".env").write_text("ROTATED=sk-test-rotated-not-kept\n"))
+            p.hook("stop")
+            blobs = [zlib.decompress(f.read_bytes()) for f in (p.root / ".blackbox" / "objects").rglob("*") if f.is_file()]
+            self.assertFalse([b for b in blobs if b"sk-test" in b], "a secret file's contents entered the record")
+            self.assertNotIn("sk-test", (p.root / ".blackbox" / "timeline.html").read_text())
+            write = p.step(tool="Write")
+            self.assertEqual([(f["path"], f["change"]) for f in write["files"]], [(".env", "modified")])   # the change is still noted
+            self.assertEqual(p.step(tool="Edit")["files"], [])
+            self.assertEqual([f["path"] for f in p.step(cmd="sed -i")["files"]], [".env"])
+            manifest = json.loads((p.root / ".blackbox" / "state.json").read_text())["files"]
+            self.assertNotIn("vendor/lib.js", manifest)
+            self.assertFalse(manifest["secret-santa/list.json"][2].startswith("skip:"))
+            out = p.cli("undo", str(p.step(cmd="sed -i")["n"]), "--yes").stdout       # nothing to put back, and nothing deleted
+            self.assertIn("skip_files", out)
+            self.assertIn("ROTATED", (p.root / ".env").read_text())
         finally:
             p.cleanup()
 

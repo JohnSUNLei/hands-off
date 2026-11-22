@@ -1,6 +1,6 @@
 # hands-off
 
-**Six tiny guards that make it safe to let your AI agent work while you're not watching.**
+**Seven tiny guards that make it safe to let your AI agent work while you're not watching.**
 
 [![tests](https://github.com/JohnSUNLei/hands-off/actions/workflows/tests.yml/badge.svg)](https://github.com/JohnSUNLei/hands-off/actions/workflows/tests.yml)
 ![license MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -16,7 +16,7 @@ Each tool here stops **one specific accident**. One Python file each, standard l
 
 ![tripwire: without it, a hidden line on a web page gets the agent to send the API key out; with it, the agent is stopped before the key is read](tripwire/promo/tripwire_demo.gif)
 
-## The six
+## The seven
 
 | | The accident | The guard | |
 |---|---|---|---|
@@ -25,9 +25,10 @@ Each tool here stops **one specific accident**. One Python file each, standard l
 | 🪤 | One line of white text on a web page can get your agent to send your API key to a stranger. | **[tripwire](tripwire)** — once the agent has read something untrusted, every outbound action needs your OK | [↓](#tripwire--prompt-injection-tripwire) |
 | 📼 | It worked all night. What did it actually do — and how do you undo the one bad step? | **[blackbox](blackbox)** records a plain-language timeline with before/after of every file | [↓](#blackbox--flight-recorder-with-undo) |
 | 🛑 | Stuck on one failing test, it can re-run the same loop until morning — and bill you hundreds of dollars. | **[brake](brake)** stops a task at your dollar / token / time / loop limit, and says why | [↓](#brake--spending-limits-per-task) |
-| 🏠 | Most of what you pay the cloud for, a model on your own machine could have done. | **[local-first](local-first)** routes by plain rules — and never silently falls back to the cloud | [↓](#local-first--local-first-routing-with-a-bill) |
+| 🏠 | You can't tell where each request went or what it cost — and when your local model dies, requests quietly go to the cloud and you find out on the bill. | **[local-first](local-first)** logs where every request went and what it cost — secrets stay local, a dead local model is an error, never a silent cloud call | [↓](#local-first--local-first-routing-with-a-bill) |
+| 🔒 | A test fails, and the agent doesn't fix the code — it deletes the assertion, adds a skip, or lowers the pass line. The suite goes green; nothing is fixed. | **[bar-lock](bar-lock)** reads what a change made *easier* and stops the commit — only you can waive it | [↓](#bar-lock--the-bar-stays-where-it-is) |
 
-**Where to start:** your agent reads web pages or email → **tripwire**. It sends messages for you → **send-fuse**. You leave it running overnight → **brake** + **blackbox**. Your `CLAUDE.md` keeps growing → **rule-teeth**. You pay per token and own a decent Mac or GPU → **local-first**.
+**Where to start:** your agent reads web pages or email → **tripwire**. It sends messages for you → **send-fuse**. You leave it running overnight → **brake** + **blackbox**. Your `CLAUDE.md` keeps growing → **rule-teeth**. You pay per token and own a decent Mac or GPU → **local-first**. It "fixes" failing tests → **bar-lock**.
 
 ## How they're built
 
@@ -108,7 +109,7 @@ curl -fsSLo .brake/brake.py --create-dirs https://raw.githubusercontent.com/John
 
 ### local-first — local-first routing, with a bill
 
-An OpenAI-compatible proxy: routine work goes to LM Studio / Ollama on your machine, hard reasoning to the cloud, anything containing a secret stays local. If the local model is down, the request fails loudly instead of quietly going to the cloud. `bill` shows what you paid versus all-cloud.
+An OpenAI-compatible proxy: you know where every request went and what it cost. Routine work goes to LM Studio / Ollama on your machine, hard reasoning to the cloud. Three guarantees: anything containing a secret stays local; if the local model is down the request fails loudly instead of quietly going to the cloud; every cloud call is the result of a rule you wrote, and it shows up on the bill. `bill` prints an estimate of what you paid versus all-cloud (local electricity and compute aren't counted).
 
 ![local-first: routine prompts run locally, hard reasoning goes to the cloud, a secret stays local, the local server goes down and nothing falls back to the cloud, then the monthly bill](local-first/promo/demo.gif)
 
@@ -117,6 +118,18 @@ curl -fsSL https://raw.githubusercontent.com/JohnSUNLei/hands-off/main/local-fir
 ```
 
 [Full README →](local-first)
+
+### bar-lock — the bar stays where it is
+
+When a test fails, an agent can fix the code — or make the check easier: delete the assertion, add a skip, widen a tolerance, swallow the error, lower the pass line. A linter can't see it; the evidence is in the *change*. bar-lock reads the change and stops the commit, and stops the agent from saying "done". The waiver is yours, from your own terminal — one the agent writes into the diff counts for nothing.
+
+![bar-lock: without it the agent turns the suite green by lowering five bars; with it the commit is stopped and the agent has to fix the code](bar-lock/promo/bar_lock_demo.gif)
+
+```bash
+curl -fsSLo .bar-lock/bar_lock.py --create-dirs https://raw.githubusercontent.com/JohnSUNLei/hands-off/main/bar-lock/bar_lock.py && python3 .bar-lock/bar_lock.py init
+```
+
+[Full README →](bar-lock)
 
 ---
 
@@ -129,7 +142,7 @@ python3 run_tests.py tripwire   # just one
 
 ## Why "hands-off"
 
-AI is moving from answering questions to doing things for us. The next step isn't a smarter model — it's being able to take your hands off the keyboard and trust what happens next. These six cover the accidents that showed up first. More will follow as new ones do.
+AI is moving from answering questions to doing things for us. The next step isn't a smarter model — it's being able to take your hands off the keyboard and trust what happens next. These seven cover the accidents that showed up first. More will follow as new ones do.
 
 `send-fuse` exists because of a real one: the author's agent emailed someone a fresh set of times — for a meeting that was already booked. Twice.
 

@@ -340,6 +340,18 @@ def _secrets(text: str, file_lang: str):
     return None
 
 
+RUN_CWD = re.compile(r"在\s*`([^`]+)`\s*(?:目录)?下|(?:\bin|\bfrom|\bunder)\s+`([^`]+/)`|cd\s+([\w./-]+)\s*&&")
+
+
+def run_cwd(text: str, with_cd: bool = True) -> str:
+    """规则里写的「在 `x/` 下跑」：命令该在哪个目录跑。with_cd=False 时不认命令自己里面的 `cd x &&`。"""
+    for m in RUN_CWD.finditer(text):
+        d = m.group(1) or m.group(2) or (m.group(3) if with_cd else "")
+        if d:
+            return d.strip("/")
+    return ""
+
+
 def _run_command(text: str):
     if not (RUN_VERB.search(text) and RUN_TIMING.search(text)):
         return None
@@ -347,10 +359,9 @@ def _run_command(text: str):
     for s, _ in spans(text):
         if is_command(s) and s not in neg and not _PLACEHOLDER.search(s):
             spec = {"type": "run_command", "command": s, "timeout": 300, "enabled": False}
-            m = re.search(r"在\s*`([^`]+)`\s*(?:目录)?下|(?:\bin|\bfrom|\bunder)\s+`([^`]+/)`|cd\s+([\w./-]+)\s*&&",
-                          text)
-            if m:
-                spec["cwd"] = (m.group(1) or m.group(2) or m.group(3)).strip("/")
+            cwd = run_cwd(text)
+            if cwd:
+                spec["cwd"] = cwd
             return spec
     return None
 

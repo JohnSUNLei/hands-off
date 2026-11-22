@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run every tool's test suite (or the ones named on the command line).
 
-    python3 run_tests.py              # all six
+    python3 run_tests.py              # all seven
     python3 run_tests.py tripwire     # just one
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-TOOLS = ["rule-teeth", "send-fuse", "tripwire", "blackbox", "brake", "local-first"]
+TOOLS = ["rule-teeth", "send-fuse", "tripwire", "blackbox", "brake", "local-first", "bar-lock"]
 
 
 def main(argv: list[str]) -> int:

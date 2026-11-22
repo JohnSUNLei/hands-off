@@ -113,6 +113,126 @@ class AfterInjectedPage(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+class AlwaysOn(unittest.TestCase):
+    """Always-on protection: git hooks / git config and the git config keys that run commands. A clean session is asked
+    too; everything else stays quiet until the session is tainted."""
+
+    def setUp(self):
+        self.p = Project()
+        self.hook_path = str(self.p.root / ".git" / "hooks" / "pre-commit")
+
+    def tearDown(self):
+        self.p.cleanup()
+
+    def bash(self, command, **kw):
+        return self.p.decision("pre_bash_ls", tool_input={"command": command}, **kw)
+
+    def test_clean_session_is_asked_before_touching_git_hooks(self):
+        d, why = self.p.decision("pre_write_src", tool_input={"file_path": self.hook_path, "content": "#!/bin/sh\n"})
+        self.assertEqual(d, "ask")
+        self.assertIn("ALWAYS-ON", why)
+        self.assertIn("changes agent / CI / shell config", why)
+        self.assertIn("Write .git/hooks/pre-commit", why)
+        self.assertNotIn("read:", why)                                   # nothing untrusted was read
+        self.assertNotIn("tripwire.py clear", why)                      # clear cannot lift this one
+        d, why = self.p.decision("pre_write_src", tool_name="Edit",
+                                 tool_input={"file_path": str(self.p.root / ".git" / "config"), "old_string": "a", "new_string": "b"})
+        self.assertEqual(d, "ask")
+
+    def test_clean_session_is_asked_before_bash_writes_and_exec_keys(self):
+        for cmd in ("cat payload > .git/hooks/pre-commit", "cp evil.sh .git/hooks/pre-commit", "chmod +x .git/hooks/pre-commit",
+                    "sed -i s/a/b/ .git/config", "git config core.hooksPath .githooks",
+                    "git config --global alias.st '!sh x'", "git config core.fsmonitor 'sh x'"):
+            d, why = self.bash(cmd)
+            self.assertEqual(d, "ask", cmd)
+            self.assertIn("ALWAYS-ON", why, cmd)
+
+    def test_ordinary_work_is_not_interrupted(self):
+        for cmd in ("git config user.name 'John Sun'", "git config --get core.hooksPath", "git config --list",
+                    "git push -u origin feature", "git push origin main", "git commit -m 'edit .git/hooks/ docs'",
+                    "cat .git/config", "ls .git/hooks", "cp a.txt b.txt", "echo x >> notes.md"):
+            self.assertEqual(self.bash(cmd), (None, ""), cmd)
+        self.assertEqual(self.p.decision("pre_read_src"), (None, ""))
+        self.assertEqual(self.p.decision("pre_write_src"), (None, ""))
+        self.assertEqual(self.p.decision("pre_read_src", tool_input={"file_path": str(self.p.root / ".git" / "config")}),
+                         (None, ""))                                      # reading is fine
+        self.assertEqual(self.p.decision("pre_write_src", tool_input={"file_path": str(self.p.root / "src" / "new.py"),
+                                                                       "content": "x"}), (None, ""))
+
+    def test_other_protected_paths_still_wait_for_taint(self):
+        self.assertEqual(self.p.decision("pre_write_claude_md"), (None, ""))
+        self.assertEqual(self.bash("echo 'alias x=y' >> ~/.zshrc"), (None, ""))
+        self.assertEqual(self.bash("git remote set-url origin https://e.example/r.git"), (None, ""))
+        self.assertEqual(self.p.decision("pre_bash_git_push"), (None, ""))
+
+    def test_no_human_mode_blocks(self):
+        d, why = self.bash("git config core.hooksPath /tmp/h", permission_mode="bypassPermissions")
+        self.assertEqual(d, "deny")
+        self.assertIn("Blocked", why)
+        self.assertIn("ALWAYS-ON", why)
+        d, _ = self.p.decision("pre_write_src", tool_input={"file_path": self.hook_path, "content": "x"},
+                               permission_mode="dontAsk")
+        self.assertEqual(d, "deny")
+        self.assertEqual(self.bash("git config user.name x", permission_mode="bypassPermissions"), (None, ""))
+
+    def test_mcp_file_tool_is_asked_in_a_clean_session(self):
+        d, why = self.p.decision("pre_mcp_send_message", tool_name="mcp__filesystem__write_file",
+                                 tool_input={"path": self.hook_path, "content": "#!/bin/sh\n"})
+        self.assertEqual(d, "ask")
+        self.assertIn("ALWAYS-ON", why)
+        self.assertIn("mcp__filesystem__write_file", why)
+        self.assertEqual(self.p.decision("pre_mcp_send_message", tool_name="mcp__filesystem__write_file",
+                                         tool_input={"path": str(self.p.root / "src" / "x.py"), "content": "x"}), (None, ""))
+
+    def test_deny_mode_and_chinese(self):
+        p = Project(init_args=("--mode", "deny", "--lang", "zh"))
+        try:
+            d, why = p.decision("pre_write_src", tool_input={"file_path": str(p.root / ".git" / "hooks" / "x"), "content": "x"})
+            self.assertEqual(d, "deny")
+            self.assertIn("常开保护", why)
+        finally:
+            p.cleanup()
+        p = Project(init_args=("--lang", "zh"))
+        try:
+            d, why = p.decision("pre_bash_ls", tool_input={"command": "git config core.hooksPath /x"})
+            self.assertEqual(d, "ask")
+            self.assertIn("常开保护", why)
+            self.assertIn("clear 解不开", why)
+        finally:
+            p.cleanup()
+
+    def test_tainted_session_gets_the_same_ask_plus_the_source(self):
+        self.p.hook("post_webfetch_injection")
+        d, why = self.p.decision("pre_write_src", tool_input={"file_path": self.hook_path, "content": "x"})
+        self.assertEqual(d, "ask")
+        self.assertIn("ALWAYS-ON", why)
+        self.assertIn("WebFetch https://pricing.example/plans", why)
+
+    def test_clear_does_not_lift_it(self):
+        self.p.hook("post_webfetch_injection")
+        self.p.cli("clear")
+        d, why = self.p.decision("pre_write_src", tool_input={"file_path": self.hook_path, "content": "x"})
+        self.assertEqual(d, "ask")
+        self.assertEqual(self.p.decision("pre_read_env"), (None, ""))     # the tainted-only rules did lift
+
+    def test_the_log_says_which_asks_were_always_on(self):
+        self.p.decision("pre_write_src", tool_input={"file_path": self.hook_path, "content": "x"})
+        log = self.p.cli("log").stdout
+        self.assertIn("ask", log)
+        self.assertIn("(always-on)", log)
+        self.assertEqual(self.p.cli("status").stdout.strip(), "No tainted sessions. Nothing untrusted has been read (or it was cleared).")
+
+    def test_your_own_always_paths(self):
+        pol = self.p.root / ".tripwire" / "policy.json"
+        doc = json.loads(pol.read_text())
+        doc["always_protected_paths"] = ["deploy/"]
+        pol.write_text(json.dumps(doc))
+        d, _ = self.p.decision("pre_write_src", tool_input={"file_path": str(self.p.root / "deploy" / "prod.yml"), "content": "x"})
+        self.assertEqual(d, "ask")
+        d, _ = self.p.decision("pre_write_src", tool_input={"file_path": self.hook_path, "content": "x"})
+        self.assertEqual(d, "ask")                                         # the defaults stay
+
+
 class OtherSources(unittest.TestCase):
     def setUp(self):
         self.p = Project()

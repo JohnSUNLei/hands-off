@@ -5,8 +5,8 @@
 Point any OpenAI-compatible client at http://127.0.0.1:8484/v1. Each request is routed by
 plain, readable rules (task type, prompt length, tags, images, tools) to a local backend
 (LM Studio, Ollama, llama.cpp, vLLM…) or to a cloud backend — and every request lands in a
-ledger, so `local-first bill` can tell you what this month cost and what it would have cost
-if everything had gone to the cloud.
+ledger, so `local-first bill` can give you an estimate of what this month cost and what it would
+have cost if everything had gone to the cloud.
 
 Two promises, both enforced in code and tests:
   * No silent fallback. If the local backend is down or its model isn't loaded, the request
@@ -22,7 +22,7 @@ goes. One file, Python standard library only.
     python3 localfirst.py init        # write local-first.json
     python3 localfirst.py check       # are the backends really up? (live probe)
     python3 localfirst.py serve       # run the proxy
-    python3 localfirst.py bill        # this month's bill
+    python3 localfirst.py bill        # this month's estimated bill
 """
 from __future__ import annotations
 
@@ -522,7 +522,7 @@ def _num(n: int) -> str:
 
 def format_bill(b: dict, month: str, color: bool = False) -> str:
     c = _Ansi(color)
-    lines = [c.bold(f"local-first bill · {month}"), "",
+    lines = [c.bold(f"local-first bill (estimate) · {month}"), "",
              f"  {'backend':<22}{'requests':>9}{'tokens in':>11}{'tokens out':>12}{'cost':>11}"]
     for x in b["backends"]:
         where = "local" if x["local"] else "cloud"
@@ -532,11 +532,11 @@ def format_bill(b: dict, month: str, color: bool = False) -> str:
                      f"{_num(x['out']):>12}{'$' + format(x['paid'], ',.2f'):>11}{est}")
     lines.append("  " + "─" * 65)
     money = lambda v: f"{'$' + format(v, ',.2f'):>11}"  # noqa: E731 — pad before colouring
-    lines.append(f"  {'you paid':<54}{c.bold(money(b['paid']))}")
+    lines.append(f"  {'you paid (est.)':<54}{c.bold(money(b['paid']))}")
     cp = b["compare_price"]
-    lines.append(f"  {'all-cloud would have cost':<54}{money(b['all_cloud'])}")
+    lines.append(f"  {'all-cloud would have cost (est.)':<54}{money(b['all_cloud'])}")
     pct = f" ({b['saved'] / b['all_cloud']:.0%})" if b["all_cloud"] else ""
-    lines.append(f"  {'saved':<54}{c.green(money(b['saved']))}{pct}")
+    lines.append(f"  {'saved (est.)':<54}{c.green(money(b['saved']))}{pct}")
     lines.append("")
     lines.append(f"  {b['local_share']:.0%} of {b['requests']} requests ran on this machine.")
     if b["kept_local"]:
@@ -544,9 +544,9 @@ def format_bill(b: dict, month: str, color: bool = False) -> str:
     if b["local_down"]:
         lines.append(f"  {b['local_down']} request(s) failed loudly because the local model was down — none were "
                      f"quietly sent to the cloud.")
-    lines.append(c.dim(f"  priced at ${cp.get('input_per_mtok', 0):g} in / ${cp.get('output_per_mtok', 0):g} out per "
-                       f"million tokens (set yours in local-first.json);"))
-    lines.append(c.dim("  local electricity and hardware not counted."))
+    lines.append(c.dim("  estimate: prices come from your config; local electricity and compute are not counted."))
+    lines.append(c.dim(f"  all-cloud priced at ${cp.get('input_per_mtok', 0):g} in / ${cp.get('output_per_mtok', 0):g} out per "
+                       f"million tokens (set yours in local-first.json)."))
     if any(x["estimated"] for x in b["backends"]):
         lines.append(c.dim("  * some token counts estimated (backend sent no usage)."))
     return "\n".join(lines)
@@ -971,7 +971,7 @@ def cmd_demo(a) -> int:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="local-first", description="Run what you can on your own machine. Know what you saved.")
+    ap = argparse.ArgumentParser(prog="local-first", description="Run what you can on your own machine. Know where every request went and what it cost (estimated).")
     ap.add_argument("-V", "--version", action="version", version=f"local-first {VERSION}")
     sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("serve", help="run the OpenAI-compatible proxy")
@@ -986,7 +986,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("prompt")
     p.add_argument("--tag", action="append")
     p.add_argument("--model", default="auto")
-    p = sub.add_parser("bill", help="this month's bill")
+    p = sub.add_parser("bill", help="this month's estimated bill")
     p.add_argument("--month", help="YYYY-MM")
     p.add_argument("--ledger")
     p.add_argument("--json", action="store_true")

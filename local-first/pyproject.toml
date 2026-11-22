@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "local-first"
 version = "0.1.0"
-description = "OpenAI-compatible proxy that runs what it can on your own machine, never falls back silently, and shows what you saved."
+description = "OpenAI-compatible proxy that runs what it can on your own machine, never falls back silently, and shows where every request went and an estimate of what it cost."
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}

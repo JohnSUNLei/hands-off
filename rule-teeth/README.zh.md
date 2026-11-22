@@ -20,11 +20,12 @@ stop and tell the user; the user decides whether to change the rule.
 
 你在 `CLAUDE.md` 里写了 50 条规则，AI 还是不听，于是你写到 80 条、100 条，token 越来越贵。rule-teeth 帮你找出哪几条其实能让机器来管，生成检查、挂进 Claude Code 的 hook —— 从此那几条不用再靠 AI 记性。
 
-## 它做三件事
+## 它做四件事
 
-1. **体检**（只读）：先算**每次必读链** —— 每个 session 开工前固定要读多少 token，连规则里写着「每个 session 都读」的文件一起算；再把每条规则分成三类 —— 能自动检查 / 要人判断 / 写得太模糊；再告诉你哪些从来没被机器检查过、哪些只服务一个子项目该下沉、根文件是不是超了体量、哪些路径已经断了。
+1. **体检**（只读）：先算**每次必读链** —— 每个 session 开工前固定要读多少 token，连规则里写着「每个 session 都读」的文件一起算；再把每条规则分成三类 —— 能自动检查 / 要人判断 / 写得太模糊；再告诉你哪些从来没被机器检查过、哪些只服务一个子项目该下沉、根文件是不是超了体量。其中**规则验真**把规则文件点名的路径和命令（`~/…`、绝对路径、仓库里的相对路径、`python3 x.py`、`npm run x`、`make x`）挨个查一遍，标成「在 / 失效 / 未能判断」—— 拿不准的不算通过。
 2. **装牙**：能查的规则生成可运行的检查（Python，只用标准库），写进项目里的 `.rule-teeth/`，一条命令挂进 Claude Code 的 hook。
 3. **咬人**：AI 改文件、跑命令之前先过一遍；要结束之前再过一遍。违反了就拦下，并告诉 AI 违反的是哪条、写在第几行。
+4. **实测榜**（只读）：拿 Claude Code 存在你电脑上的会话记录（`~/.claude/projects/…`），把历史上每次改文件、跑命令、每轮最后一句回复，对着现在的规则重放一遍，排出三张榜：**最常被违反的**、**从没触发的**（候选删掉或降级）、**能查却还没装牙的**；另外数 rule-teeth 真拦过几次。先改哪条，按真实违规次数排，不再凭感觉。
 
 分类靠词表和正则，检查靠正则、计数和跑命令。同一份规则永远得到同一个结论。
 
@@ -44,6 +45,12 @@ python3 hands-off/rule-teeth/rule_teeth.py checkup /你的项目 --out 体检报
 
 ```bash
 python3 hands-off/rule-teeth/rule_teeth.py init /你的项目 --hook
+```
+
+AI 到底常违反哪几条？拿你自己的 Claude Code 会话重放一遍（只读）：
+
+```bash
+python3 hands-off/rule-teeth/rule_teeth.py audit /你的项目 --out 实测榜.md
 ```
 
 不想要了，一条命令摘掉：
@@ -66,6 +73,8 @@ python3 hands-off/rule-teeth/rule_teeth.py unhook /你的项目
 
 花一个下午把规则搬到该在的层之后：每个 session 3,737 token，一条规则都没删。怎么做的：[LAYERS.zh.md](LAYERS.zh.md)。
 
+同一个仓库跑 `audit`（18 天、163 个会话文件，重放了 8,209 次改文件 / 跑命令和 682 条回复）：最常被违反的是「回复开头」那条，279 条回复没照做 —— 它最后一天才装上牙，装上以后拦了 3 次；2 条能查的规则从没触发；6 条还没装牙。规则验真查了 80 个路径 / 命令：1 个失效，1 个没写在哪个目录下跑（未能判断）。
+
 两个公开项目的 AGENTS.md 也体检过（只读，只给位置和分类，不转载原文）：[vercel/next.js](demo/public/vercel-next.js_AGENTS.md_checkup.md)（33KB、550 行，是官方建议 200 行的近 3 倍，每个 session 约 9,400 token；71 条规则里 8 条能直接变成 hook）、[openai/openai-agents-python](demo/public/openai-agents-python_AGENTS.md_checkup.md)。
 
 ## 三类规则
@@ -87,9 +96,45 @@ python3 hands-off/rule-teeth/rule_teeth.py unhook /你的项目
 | 不许写密钥 | 「API key 不硬编码」「Never commit secrets」（内置 8 种密钥格式） | 改文件前、结束前 |
 | 不许改的文件 | 「不要改 `vendor/`」「Do not edit `docs/ja`」 | 改文件前 |
 | 不许跑的命令 | 「Do NOT `gh pr ready`」「用 `pnpm` 不用 `npm`」「commit 里不许写 "Generated with …"」 | 跑命令前 |
+| 不许传给某个 MCP 工具的内容 | 「不许让 AI 给数据库工具发不带 `WHERE` 的 `DELETE`」—— **手写**，`init` 不会自动生成（[见下](#管住-mcp-工具forbid_tool_input)） | 指定的工具运行前 |
 | 结束前必须跑通的命令 | 「改完代码跑 `pytest`」 | 结束前（**默认关**，要你亲手打开） |
 | 回复开头 | 「回复都以 "John —" 开头」 | 结束前 |
 | 每次必读预算 | 「每个 session 固定要读的规则合计不超过 4,000 token」—— 根文件、`@导入`、不带 paths 的 `.claude/rules`、规则里写着「每次都读」的文件一起算 | 改这条链上的任何文件前、结束前 |
+
+## 管住 MCP 工具（`forbid_tool_input`）
+
+`init` 装的 hook 只匹配 `Write|Edit|Bash`。MCP 工具（数据库、GitHub、文件服务）是另一个工具名，上面所有检查都看不到它 —— Bash 里会被拦的事，AI 换成 MCP 就能做。`forbid_tool_input` 专门看**某个指定工具的入参**。它要你判断「哪个工具、什么算太危险」，所以是**手写**进 `.rule-teeth/rules.json` 的，`init` 不会生成；而且 **`.claude/settings.json` 里这条 hook 的 matcher 必须写上这个工具名**，比如 `Write|Edit|Bash|mcp__supabase__execute_sql|mcp__supabase__apply_migration`。Claude Code 是开会话时读 hook 配置的，所以改了 matcher 要新开的会话才带上。
+
+| 键 | 意思 |
+|---|---|
+| `type` | `"forbid_tool_input"` |
+| `tools` | 工具名，`fnmatch` 通配，区分大小写：`["mcp__supabase__execute_sql"]`、`["mcp__supabase__*"]` |
+| `field` | 扫入参里的哪个键（比如 `"query"`）。入参里没有这个键（工具改了名）→ 扫**全部**字符串值，免得改名后规则悄悄失效 |
+| `sql_deny` | 内置的 SQL 类别：`truncate`、`drop_table`、`drop_schema`、`drop_database`、`delete_no_where`、`update_no_where` |
+| `patterns` | 你自己的正则。默认匹配原始字符串；加 `"normalize": "sql"` 则匹配「去掉注释、字符串内容、子查询之后的每条 SQL 语句」 |
+| `rule` / `source` / `enabled` / `note` | 和别的检查一样 |
+
+没写 `tools`、没写类别也没写正则、类别名拼错、正则编译不过，都会在加载 `rules.json` 时直接报错 —— 一条悄悄什么都不拦的规则，比大声报错更糟。
+
+```json
+{"id": "RT13", "type": "forbid_tool_input", "tools": ["mcp__supabase__execute_sql"], "field": "query",
+ "sql_deny": ["truncate", "drop_table", "drop_schema", "drop_database", "delete_no_where", "update_no_where"],
+ "rule": "SQL 工具不许清表删表", "source": "CLAUDE.md:12"}
+{"id": "RT14", "type": "forbid_tool_input", "tools": ["mcp__supabase__apply_migration"], "field": "query",
+ "sql_deny": ["truncate", "drop_schema", "drop_database", "delete_no_where", "update_no_where"],
+ "rule": "迁移里可以删表，但不许清数据"}
+```
+
+**它怎么读 SQL。** 不连数据库，什么都不执行，只把文字拆成一条条语句：`--` 和 `/* */` 注释（含嵌套）换成空格，`'…'` / `E'…'` / `"…"` 的内容抹掉，`;` 分句，每个 `( … )` 当成一条独立语句来判断。所以字符串、注释里的关键字不算（`SELECT 'DROP TABLE x'` 放行），子查询里的 `WHERE` 不算外层语句的 `WHERE`（`UPDATE t SET a = (SELECT … WHERE …)` 照拦），`WITH d AS (DELETE FROM t RETURNING *)` 也藏不住。`DO $$ … $$` 块和函数体当代码扫。单独一个 `WHERE true` / `WHERE 1=1` 算没有 `WHERE`。`ON CONFLICT … DO UPDATE SET`、`FOR UPDATE`、`ON DELETE CASCADE`、`GRANT UPDATE ON …`、`CREATE TRIGGER … AFTER DELETE` 都不是在改数据，放行。拦截信息只说类别（「DELETE 没有 WHERE」），**不回显 SQL 原文** —— 里面可能有用户数据。
+
+**收紧或放松。** 每个类别就是 `sql_deny` 里的一项。想让迁移里的 `DROP TABLE` 也拦，把 `"drop_table"` 加进 RT14 的列表；内置类别没覆盖的，加一条正则：`"patterns": ["\\bDROP\\s+COLUMN\\b"], "normalize": "sql"`；想放过某一类，把它从列表里去掉；整条关掉用 `"enabled": false`。
+
+**它拦不住的**（这是护栏不是墙 —— 它看的是 AI 写了什么，不是数据库会怎么执行）：
+- 运行时拼出来的 SQL：`EXECUTE 'DELETE FROM t'`、`format(…)`、字符串拼接。
+- `MERGE … WHEN MATCHED THEN DELETE`；六类之外的破坏性语句（`DROP COLUMN`、`ALTER … TYPE`、`DROP FUNCTION`、`REVOKE` ……），要拦得自己加正则。
+- 对每一行都成立、却不是单独 `true` / `1=1` 的 `WHERE`（`WHERE id = id`、`WHERE a = 1 OR true`）。
+- 走别的路到达数据库的操作（命令行、控制台、Edge Function，或不在 matcher 里的别的工具名）。
+- 也有误报：列名恰好叫 `delete` / `update`；函数**定义**里带着不带 `WHERE` 的 `DELETE`，虽然还没执行也会被拦。
 
 ## 规则越写越多，token 怎么不涨
 
@@ -103,6 +148,8 @@ python3 hands-off/rule-teeth/rule_teeth.py unhook /你的项目
 - **老问题登记成欠条，不是豁免。** 装牙时现有的违规登记成「暂缓」，默认 30 天到期，到期自动重新算违规。
 - **坏了要说出来，但不挡路。** `rules.json` 写坏了，hook 显式报错（Claude Code 里看得见），但不拦你干活。
 - **不死循环。** 结束前的检查对同一批违规最多连拦 2 次，之后放行并明确提示「还没解决，请人来看」；Claude Code 自己也有连续 8 次的上限。
+- **会话记录只读不改。** `audit` 只用只读方式打开会话记录，不跑任何命令，不调模型。找不到会话记录、目录是空的，直接报错，不出一份「一切正常」的空报告；读不懂的行数出来写进报告。
+- **未能判断 ≠ 通过。** 规则验真什么都不执行，只看磁盘、PATH、`package.json` 和 Makefile；这些看不出来的，就老实写「未能判断」。
 
 ## 和 Claude Code 自带的 `/doctor prompt-audit` 有什么不一样
 
@@ -111,10 +158,12 @@ python3 hands-off/rule-teeth/rule_teeth.py unhook /你的项目
 ## 已知局限（v0.2）
 
 - 「写着每次都读」靠中英文常见说法认（「每个 session 都读」「开工前先读」、标题写着「每个 session 都读」、read X at the start of every session 等），别的说法会漏算；「」或引号里提到的算谈论规则，不算规则。
-- 只认内置的 8 种牙。「函数不超过 50 行」要按语言做语法分析，还没做。
+- 只认内置的 9 种牙（第 9 种 `forbid_tool_input` 要手写：`init` 不会生成它，`audit` 也不重放它）。「函数不超过 50 行」要按语言做语法分析，还没做。
 - 走 Bash 写文件（`cat > a.py`）绕过了改文件前的检查；结束前的全量检查会补上，但那时文件已经写了。
 - 「已有检查」是线索不是证明：测试 / CI / hook 文件里出现了规则编号或它独有的写法就算。
 - 只读一份别人的 AGENTS.md 时，看不到他们的仓库，所以不说「从没被检查过」，只说「规则文件里没写明由谁兜底」。
+- `audit` 拿的是**现在**的规则去重放以前的会话。Write 按整个新文件算（会话记录里看不出改之前长什么样）；Edit 只看新增的那段；行数上限只有 Write 能算；用 Bash 写进文件的内容看不到。「结束前必须跑通的命令」和「每次必读预算」没法重放，只数真拦过几次。
+- 规则验真查的是这台电脑。PATH 里找不到的程序标「未能判断」（AI 的 shell 可能 PATH 不同）；`python -m x` 只在这台电脑的 Python 里找。
 
 ## 开发
 
@@ -122,7 +171,7 @@ python3 hands-off/rule-teeth/rule_teeth.py unhook /你的项目
 python3 tests/run_all.py
 ```
 
-只用标准库 unittest，要 git（会造临时仓库）。其中 `tests/test_hook.py` 用子进程模拟 Claude Code 调 hook，验证退出码 2、提示文字、防死循环。
+只用标准库 unittest，要 git（会造临时仓库）。其中 `tests/test_hook.py` 用子进程模拟 Claude Code 调 hook，验证退出码 2、提示文字、防死循环；`tests/test_audit.py` 拿 `tests/fixtures/sessions/` 里的假会话记录重放。
 
 ## 文件
 
@@ -133,6 +182,8 @@ ruleteeth/
   parse.py             找规则文件、切成候选片段
   classify.py          判断是不是规则、分三类、生成检查
   checkup.py           体检：没检查过的、该下沉的、超体量的、死指针、写两遍的、检查覆盖不全的
+  refs.py              规则验真：规则点名的路径和命令在不在（在 / 失效 / 未能判断）
+  audit.py             实测榜：重放本机 Claude Code 会话记录，按真实违规次数给规则排先后
   report.py            写成 Markdown 报告（中 / 英）
   install.py           写 .rule-teeth/、挂 / 摘 hook
   model.py             数据类型（每个概念只定义一次）

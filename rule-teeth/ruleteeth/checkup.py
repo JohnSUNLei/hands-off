@@ -6,13 +6,12 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import classify, engine, parse
-from .model import CHECKABLE, JUDGMENT, VAGUE, Finding, Rule
+from . import classify, engine, parse, refs
+from .model import BROKEN, CHECKABLE, JUDGMENT, UNKNOWN, VAGUE, Finding, Rule
 
 DEFAULT_MAX_LINES = 200          # Claude Code 官方建议：每个 CLAUDE.md 200 行以内
 DEFAULT_MAX_KB = 10              # 本仓库「宪法分层规则」：项目根约 10KB
@@ -42,8 +41,9 @@ class Checkup:
     subprojects: list
     findings: list = field(default_factory=list)
     sink: list = field(default_factory=list)          # [(Rule, 说明, 建议去处)]
-    dead: list = field(default_factory=list)          # [(规则文件, 路径)]
-    external: list = field(default_factory=list)      # [(规则文件, 路径, 本机在不在)]
+    dead: list = field(default_factory=list)          # [(规则文件, 路径, False)] 仓库里找不到的相对路径
+    external: list = field(default_factory=list)      # [(规则文件, 路径, 结论 ok/broken/unknown)]
+    refs: list = field(default_factory=list)          # 规则验真：点名的路径和命令（model.Ref）
     duplicates: list = field(default_factory=list)    # [(Rule, Rule, 相似度)]
     coverage: list = field(default_factory=list)      # [(规则文件, 条数, 有检查的子项目, 没检查的子项目, 语言)]
     current: list = field(default_factory=list)       # 按规则原文扫一遍，现在就不符合的地方（Violation）
@@ -234,55 +234,13 @@ def sink_bytes(sink: list) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 指针、重复
+# 指针（规则验真在 refs.py）、重复
 # ---------------------------------------------------------------------------
-NOT_A_PATH = re.compile(r"^(?:text|application|image|audio|video|multipart|font)/[\w.+-]+$")
-
-
-def pointers(root: Path, rfiles: list, files: list):
-    """规则文件里提到、但仓库里找不到的路径；以及指到仓库外面的路径。
-
-    按规则逐段看：同一段里前面提过目录，后面的裸文件名先按那个目录找（「`a/README.md`、`GLOSSARY.md`」）；
-    同一段里有仓库外路径或占位符（`<公司>`）的，后面的相对名字说不清是相对谁，不报。
-    """
-    fileset = set(files)
-    names = {f.rsplit("/", 1)[-1] for f in files}
-    dirs = {"/".join(f.split("/")[:i]) for f in files for i in range(1, f.count("/") + 1)}
-    dead, external, seen = [], [], set()
-    for rf in rfiles:
-        for c in parse.split_candidates(rf.path, rf.text):
-            text = c.text
-            vague_base = bool(re.search(r"`[~/][^`]*`|`[^`]*<[^`>]+>[^`]*`", text))
-            for m in re.finditer(r"`([~/][^`\n]+)`", text):
-                p = m.group(1).strip()
-                if (rf.path, p) not in seen and not re.match(r"^/[\w-]+$", p):
-                    seen.add((rf.path, p))
-                    external.append((rf.path, p, os.path.exists(os.path.expanduser(p))))
-            bases = []
-            for p in parse.referenced_paths(text):
-                if p.startswith(("~", "/")) or NOT_A_PATH.match(p):
-                    continue
-                bare = "/" not in p.rstrip("/")
-                if (rf.path, p) in seen or (bare and vague_base):
-                    continue
-                if not (bare or re.search(r"\.\w{1,8}$", p) or p.endswith("/") or p.split("/", 1)[0] in dirs):
-                    continue                      # 接口路径、MIME 类型这类带斜杠的东西不是文件
-                seen.add((rf.path, p))
-                found = _exists(root, rf.path, p.rstrip("/"), fileset, names, dirs) or \
-                    any(f"{b}/{p}" in fileset for b in bases)
-                if not bare:
-                    bases.append(p.rstrip("/").rsplit("/", 1)[0] if re.search(r"\.\w{1,8}$", p) else p.rstrip("/"))
-                if not found:
-                    dead.append((rf.path, p, (root / p).exists()))
+def pointers(found: list):
+    """从规则验真的结果里拿出老的两张表：仓库里找不到的相对路径；指到仓库外面的路径（带结论）。"""
+    dead = [(r.file, r.text, False) for r in found if r.scope == "repo" and r.verdict == BROKEN]
+    external = [(r.file, r.text, r.verdict) for r in found if r.scope == "machine"]
     return dead, external
-
-
-def _exists(root: Path, from_rel: str, p: str, fileset: set, names: set, dirs: set) -> bool:
-    if parse._resolve(root, from_rel, p):
-        return True
-    if "/" not in p:
-        return p in names or p in dirs
-    return p in dirs or any(f.endswith("/" + p) or f == p for f in fileset) or any(d.endswith("/" + p) for d in dirs)
 
 
 def _norm(text: str) -> str:
@@ -335,7 +293,8 @@ def run(root, include=(), lang: str = "", max_lines: int = DEFAULT_MAX_LINES, ma
                  teeth=teeth)
     root_paths = {rf.path for rf in rfiles if rf.auto_loaded}
     cu.sink = sink_candidates(rules, subs, files, root_paths, lang)
-    cu.dead, cu.external = pointers(root, rfiles, files)
+    cu.refs = refs.collect(root, rfiles, files)
+    cu.dead, cu.external = pointers(cu.refs)
     cu.duplicates = duplicates(rules)
     cu.coverage = coverage_gaps(rules, rfiles, check_texts, subs, files)
     every = [{**c, "enabled": True} for c in build_checks(rules, lang)]
@@ -452,14 +411,19 @@ def rank_findings(cu: Checkup) -> list:
                             f"{len(cu.sink)} {_pl(len(cu.sink), 'rule', 'rules')} in the root file serve only one or some subprojects and should move "
                             f"down (~{sink_bytes(cu.sink):,} bytes) — today every session pays tokens for them"),
                            items=cu.sink))
-    auto_dead = [d for d in cu.dead if d[0] in {rf.path for rf in cu.files if rf.auto_loaded}]
-    if cu.dead:
-        out.append(Finding("dead_link", 3 if auto_dead else 2,
-                           (f"规则文件里有 {len(cu.dead)} 个路径在仓库里找不到 —— AI 照着指针去找，扑空或者自己编"
-                            if zh else
-                            f"{len(cu.dead)} paths named in rule files do not exist in the repo — the AI follows the "
-                            f"pointer and finds nothing, or makes something up"),
-                           items=cu.dead))
+    broken = [r for r in cu.refs if r.verdict == BROKEN]
+    unsure = [r for r in cu.refs if r.verdict == UNKNOWN]
+    if broken or unsure:
+        auto = {rf.path for rf in cu.files if rf.auto_loaded}
+        sev = 3 if any(r.file in auto for r in broken) else (2 if broken else 1)
+        tail_zh = f"，{len(unsure)} 个未能判断（不算通过）" if unsure else ""
+        tail_en = f"; {len(unsure)} could not be judged (not counted as passing)" if unsure else ""
+        out.append(Finding("broken_ref", sev,
+                           (f"规则验真：规则文件点名的 {len(cu.refs)} 个路径 / 命令里，{len(broken)} 个已经失效{tail_zh}"
+                            f" —— AI 照着去找，扑空或者自己编" if zh else
+                            f"Reference check: of {len(cu.refs)} paths / commands named in rule files, {len(broken)} "
+                            f"are broken{tail_en} — the AI follows them and finds nothing, or makes something up"),
+                           items=broken + unsure))
     vague = cu.by(VAGUE)
     if vague:
         out.append(Finding("vague", 2,
@@ -488,7 +452,7 @@ def rank_findings(cu: Checkup) -> list:
                             "Both CLAUDE.md and AGENTS.md exist at the root: by default Claude Code reads only CLAUDE.md, "
                             "so the rules in AGENTS.md never reach it (unless CLAUDE.md imports @AGENTS.md)"),
                            where=", ".join(ignored)))
-    order = ["load_chain", "size", "unchecked", "coverage", "quick_win", "dead_link", "current", "sink", "agents_ignored", "vague", "external", "duplicate"]
+    order = ["load_chain", "size", "unchecked", "coverage", "quick_win", "broken_ref", "current", "sink", "agents_ignored", "vague", "external", "duplicate"]
     return sorted(out, key=lambda f: (-f.severity, order.index(f.kind)))
 
 

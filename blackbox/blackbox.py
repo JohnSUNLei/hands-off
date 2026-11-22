@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import difflib
+import fnmatch
 import hashlib
 import html
 import json
@@ -58,8 +59,10 @@ DEFAULT_CONFIG = {
     "lang": "en",
     "max_file_mb": 2,          # bigger files are noted but not kept (so they cannot be undone)
     "skip_dirs": [],           # extra folders never snapshotted (added to the built-in list)
+    "skip_files": [],          # file patterns whose contents are never kept, e.g. ".env", "*.pem" (a change is still noted)
     "output_chars": 1200,      # how much of a command's output to keep for the timeline
 }
+NOT_KEPT = ("big:", "skip:")   # a manifest entry that notes a file without keeping its contents
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", ".next",
              "dist", "build", "target", ".cache", "coverage", ".tox", ".gradle", ".idea", ".turbo", ".parcel-cache",
              ".svelte-kit", "Pods", "DerivedData", ".terraform", ".tripwire", ".brake", HOME_DIR}
@@ -99,6 +102,7 @@ MSG = {
         "failed": "failed",
         "files": "{n} file(s): ",
         "added": "added", "modified": "changed", "deleted": "deleted", "big": "too big to keep",
+        "not_kept": "contents not kept",
         "risky": "check this",
         "self": "blackbox: the AI may read the flight record but not change or delete it. Ask the user to do this.",
         "no_step": "No step {n}.",
@@ -112,6 +116,7 @@ MSG = {
         "plan_delete": "  delete   {path}  (it did not exist before)",
         "plan_recreate": "  recreate {path}  (it was deleted)",
         "plan_skip": "  skip     {path}  (too big; it was not kept)",
+        "plan_skip_file": "  skip     {path}  (its contents are not kept: skip_files)",
         "confirm": "Go ahead? [y/N] ",
         "cancel": "Cancelled. Nothing changed.",
         "done": "Done. Step {n} is undone (recorded as step {m}; `undo {m}` brings it back).",
@@ -157,6 +162,7 @@ MSG = {
         "failed": "失败",
         "files": "{n} 个文件：",
         "added": "新增", "modified": "改动", "deleted": "删除", "big": "太大没保存",
+        "not_kept": "内容不保存",
         "risky": "值得看一眼",
         "self": "blackbox：AI 可以读黑匣子记录，但不能改、不能删。请让用户自己操作。",
         "no_step": "没有第 {n} 步。",
@@ -170,6 +176,7 @@ MSG = {
         "plan_delete": "  删除  {path}（这一步之前它不存在）",
         "plan_recreate": "  找回  {path}（它被删掉了）",
         "plan_skip": "  跳过  {path}（太大，当时没保存）",
+        "plan_skip_file": "  跳过  {path}（按 skip_files 设置，内容没有保存）",
         "confirm": "确定吗？[y/N] ",
         "cancel": "已取消，什么都没改。",
         "done": "好了，第 {n} 步已撤销（记为第 {m} 步；`undo {m}` 可以再改回来）。",
@@ -252,7 +259,7 @@ class Box:
         return sha
 
     def get(self, sha: str) -> bytes | None:
-        if not sha or sha.startswith("big:"):
+        if not sha or sha.startswith(NOT_KEPT):
             return None
         try:
             return zlib.decompress((self.home / "objects" / sha[:2] / sha[2:]).read_bytes())
@@ -262,6 +269,15 @@ class Box:
     # -- project files
     def skip(self) -> set:
         return SKIP_DIRS | set(self.cfg.get("skip_dirs") or [])
+
+    def in_skipped_dir(self, rel: str) -> bool:
+        """True if a folder on the way to this file is one we never snapshot — whichever tool touched it."""
+        return bool(self.skip() & set(rel.split("/")[:-1]))
+
+    def skip_contents(self, rel: str) -> bool:
+        """skip_files: a pattern without `/` matches the file name (`.env`, `*.pem`); with `/`, the project path."""
+        base = rel.rsplit("/", 1)[-1]
+        return any(fnmatch.fnmatch(rel if "/" in p else base, p) for p in self.cfg.get("skip_files") or [])
 
     def list_files(self) -> list:
         """Every file under the project except the skipped folders — ignored files too (.env matters)."""
@@ -287,6 +303,8 @@ class Box:
         p = self.root / rel
         try:
             size = p.stat().st_size
+            if self.skip_contents(rel):     # a short fingerprint notices the change; the contents never enter the record
+                return "skip:" + hashlib.sha1(p.read_bytes()).hexdigest()[:12]
             if size > float(self.cfg["max_file_mb"]) * 1_000_000:
                 return f"big:{size}"
             return self.put(p.read_bytes())
@@ -308,7 +326,7 @@ class Box:
     def refresh(self, st: dict, only: list | None = None) -> list:
         """Bring the manifest up to date with disk. Returns [file change] for whatever differs."""
         files = st["files"]
-        names = self.list_files() if only is None else [r for r in only if r]
+        names = self.list_files() if only is None else [r for r in only if r and not self.in_skipped_dir(r)]
         changes = []
         seen = set()
         for rel in names:
@@ -360,12 +378,19 @@ class Box:
         return self.home / "pending" / f"{safe}.json"
 
 
+def _contents_skipped(f: dict) -> bool:
+    """A skip_files entry on either side: we never had its contents, so undo must not touch it."""
+    return any(str(f.get(k) or "").startswith("skip:") for k in ("before", "after"))
+
+
 def file_change(rel: str, before, after) -> dict:
     change = "added" if before is None else "deleted" if after is None else "modified"
     return {"path": rel, "change": change, "before": before, "after": after}
 
 
 def count_lines(box: Box, ch: dict) -> dict:
+    if _contents_skipped(ch):
+        return ch
     a, b = box.get(ch.get("before")), box.get(ch.get("after"))
     try:
         la = a.decode("utf-8").splitlines() if a is not None else []
@@ -672,7 +697,9 @@ def undo(box: Box, n: int, force: bool = False, assume_yes: bool = False, out=pr
             return 1
         out(t(lang, "plan", n=n, summary=summary(lang, step, box.root)))
         for f in files:
-            if str(f.get("before") or "").startswith("big:"):
+            if _contents_skipped(f):
+                key = "plan_skip_file"
+            elif str(f.get("before") or "").startswith("big:"):
                 key = "plan_skip"
             elif f.get("before") is None:
                 key = "plan_delete"
@@ -693,7 +720,7 @@ def undo(box: Box, n: int, force: bool = False, assume_yes: bool = False, out=pr
         for f in files:
             before = f.get("before")
             p = box.root / f["path"]
-            if str(before or "").startswith("big:"):
+            if str(before or "").startswith("big:") or _contents_skipped(f):
                 continue
             cur = (st["files"].get(f["path"]) or [0, 0, None])[2]
             if before is None:
@@ -906,7 +933,9 @@ def _step_html(box: Box, s: dict, done: dict, lang: str, diffs_ok: bool = True) 
         chips = []
         for f in files[:30]:
             pm = f" +{f['plus']} −{f['minus']}" if "plus" in f else ""
-            if str(f.get("after") or f.get("before") or "").startswith("big:"):
+            if _contents_skipped(f):
+                pm = f" · {t(lang, 'not_kept')}"
+            elif str(f.get("after") or f.get("before") or "").startswith("big:"):
                 pm = f" · {t(lang, 'big')}"
             chips.append(f'<span class="f {f["change"]}">{_esc(t(lang, f["change"]))} {_esc(f["path"])}{_esc(pm)}</span>')
         if len(files) > 30:

@@ -54,10 +54,33 @@ class RuleFile:
     scope: tuple = ()           # .claude/rules/*.md 的 paths: 范围
 
 
+OK = "ok"                   # 规则验真：在
+BROKEN = "broken"           # 找不到（失效）
+UNKNOWN = "unknown"         # 未能判断 —— 不算通过
+VERDICTS = (BROKEN, UNKNOWN, OK)
+
+
+@dataclass
+class Ref:
+    """规则文件里引用的一个路径或命令，以及它在这台电脑上还在不在。"""
+    file: str                   # 规则文件，相对项目根
+    line: int
+    kind: str                   # path / command
+    text: str                   # 规则里写的原样
+    verdict: str                # OK / BROKEN / UNKNOWN
+    why: str = ""               # 怎么判的：理由代号（refs.WHY 里有中英文说法）
+    arg: str = ""               # 理由里要填的东西（比如找不到的那个脚本）
+    scope: str = "repo"         # repo = 仓库里的相对路径；machine = ~/ 或绝对路径；command
+
+    @property
+    def where(self) -> str:
+        return f"{self.file}:{self.line}"
+
+
 @dataclass
 class Finding:
     """体检里的一条发现。"""
-    kind: str                   # size / unchecked / sink / dead_link / external / duplicate / quick_win / vague
+    kind: str                   # size / unchecked / sink / broken_ref / external / duplicate / quick_win / vague …
     severity: int               # 3 = 先处理，2 = 该处理，1 = 知道一下
     title: str
     detail: str = ""

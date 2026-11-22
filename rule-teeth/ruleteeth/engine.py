@@ -30,7 +30,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 RULES_DIR = ".rule-teeth"
 RULES_FILE = "rules.json"
 STATE_FILE = "state.json"          # Stop 防死循环的小状态，不进 git
@@ -38,7 +38,7 @@ MAX_FILE_BYTES = 1_000_000          # 更大的文件不扫（多半是生成物
 STOP_RETRIES = 2                    # 同一批违规连拦几次后放行（并明说没解决）
 
 CHECK_TYPES = ("max_lines", "forbid_pattern", "no_secrets", "protected_path",
-               "forbid_command", "run_command", "reply_prefix", "load_budget")
+               "forbid_command", "run_command", "reply_prefix", "load_budget", "forbid_tool_input")
 # 每种检查在哪个时机生效。写死在这里，不让每条检查各配各的 —— 少一个旋钮就少一种配错。
 EVENTS = {
     "max_lines": ("edit", "scan"),
@@ -49,7 +49,11 @@ EVENTS = {
     "run_command": ("stop",),
     "reply_prefix": ("stop",),
     "load_budget": ("edit", "stop"),      # 管的是整条「每次必读链」，不是单个文件
+    "forbid_tool_input": ("tool",),       # MCP / 其它工具的入参（Write / Edit / Bash 之外的工具）
 }
+# forbid_tool_input 的 sql_deny 能认的类别。写死在这里：README、报错信息、测试都从这一处来。
+SQL_CATEGORIES = ("truncate", "drop_table", "drop_schema", "drop_database", "delete_no_where", "update_no_where")
+NORMALIZERS = ("sql",)
 
 LANG_EXTS = {
     "python": (".py",),
@@ -94,9 +98,20 @@ MSG = {
     "zh": {
         "block_edit": "rule-teeth 拦下了这次修改 —— 它会违反项目规则文件里写着的规则：",
         "block_bash": "rule-teeth 拦下了这条命令 —— 项目规则不许这么做：",
+        "block_tool": "rule-teeth 拦下了这次工具调用 —— 项目规则不许这么做：",
         "block_stop": "rule-teeth：先别结束，下面这些规则还没满足：",
         "self": "这是 rule-teeth 自己的检查清单 / hook 配置。AI 不能自己给自己松绑 —— 要改请让用户亲手改。",
         "how": "怎么办：按规则改好再试。如果你认为这条规则在这里确实不适用，停下来告诉用户，由用户决定改不改规则。",
+        "how_tool": "怎么办：改成不触发规则的做法再试（比如给 DELETE / UPDATE 加上 WHERE）。确实要这样做的话，停下来告诉用户，"
+                    "由用户亲手执行或决定改规则 —— 不要换个写法去绕。",
+        "tool_match": "{tool} 的参数里有 `{m}`",
+        "sql_found": "{tool} 的 SQL 里有：{what}",
+        "sql_truncate": "TRUNCATE（清空整张表）",
+        "sql_drop_table": "DROP TABLE（删表）",
+        "sql_drop_schema": "DROP SCHEMA（删整个 schema）",
+        "sql_drop_database": "DROP DATABASE（删整个数据库）",
+        "sql_delete_no_where": "DELETE 没有 WHERE（会删光整张表）",
+        "sql_update_no_where": "UPDATE 没有 WHERE（会改光整张表）",
         "rule": "规则",
         "from": "出处",
         "lines": "{n} 行，超过上限 {limit} 行",
@@ -130,9 +145,20 @@ MSG = {
     "en": {
         "block_edit": "rule-teeth blocked this edit — it would break a rule written in your project's rule file:",
         "block_bash": "rule-teeth blocked this command — the project's rules forbid it:",
+        "block_tool": "rule-teeth blocked this tool call — the project's rules forbid it:",
         "block_stop": "rule-teeth: don't stop yet — these rules are not satisfied:",
         "self": "This is rule-teeth's own check list / hook config. The AI may not loosen its own leash — ask the user to edit it by hand.",
         "how": "What to do: fix it so the rule holds, then retry. If you believe the rule truly does not apply here, stop and tell the user; the user decides whether to change the rule.",
+        "how_tool": "What to do: change it so the rule holds, then retry (e.g. give DELETE / UPDATE a WHERE). If it truly has to be done "
+                    "this way, stop and tell the user; the user runs it by hand or changes the rule — do not reword it to get around the rule.",
+        "tool_match": "the input of {tool} contains `{m}`",
+        "sql_found": "the SQL sent to {tool} contains: {what}",
+        "sql_truncate": "TRUNCATE (empties a whole table)",
+        "sql_drop_table": "DROP TABLE",
+        "sql_drop_schema": "DROP SCHEMA",
+        "sql_drop_database": "DROP DATABASE",
+        "sql_delete_no_where": "DELETE without WHERE (deletes every row)",
+        "sql_update_no_where": "UPDATE without WHERE (changes every row)",
         "rule": "rule",
         "from": "source",
         "lines": "{n} lines, over the {limit}-line limit",
@@ -329,6 +355,203 @@ def scan_command(check: dict, command: str, lang: str = "en") -> list:
 
 
 # ---------------------------------------------------------------------------
+# 看 MCP 工具的入参（forbid_tool_input）
+#
+# Write / Edit / Bash 之外的工具（MCP 工具）也会改东西，hook 的 matcher 只要写上它们的名字，这里就能看入参。
+# 规则要的是「这个工具的这个入参里出现了什么」，不是「这条命令长什么样」，所以单独一种类型。
+# SQL 是最常见的一种：正则直接扫 SQL 原文会被注释、字符串、子查询里的 WHERE 骗，
+# 所以先把 SQL 拆成「一条条语句」（sql_units），再按类别判断（sql_findings）。
+# ---------------------------------------------------------------------------
+_DOLLAR_TAG = re.compile(r"\$(?:[^\W\d]\w*)?\$")          # $$ 或 $tag$（tag 不能以数字开头）
+_SQL_QUICK = re.compile(r"truncate|drop|delete|update", re.I)   # 一个相关词都没有就不用拆
+_SQL_DEPTH = 32                                           # 美元引号嵌套的递归上限（再深的写法不会是正常 SQL）
+
+
+def _word(ch: str) -> bool:
+    return ch.isalnum() or ch in "_$"
+
+
+def sql_units(text: str, _depth: int = 0) -> list:
+    """把一段 SQL 拆成一条条「语句」，每条是去掉注释、字符串内容、括号里内容之后的纯文字。
+
+    - `--` 行注释、`/* */` 块注释（可嵌套）→ 一个空格；`DELETE/**/FROM` 也认得出来。
+    - `'...'`（含 `''`、`E'..\\'..'`）、`"..."` 标识符 → 内容换成 x，里面的关键字、分号、WHERE 都不算数。
+    - `$$...$$` / `$tag$...$tag$`：DO 块和函数体是会执行的代码，所以里面的内容当成另一段 SQL 递归拆开。
+    - `(...)` 里的内容单独成一条语句，外层只留 `()`。这样「子查询里的 WHERE」不会被算成外层语句的 WHERE，
+      `WITH d AS (DELETE FROM t RETURNING *)` 里的 DELETE 也不会被藏起来。
+    - `;` 分句。
+    """
+    out: list = []
+    frames: list = [[]]                       # 每进一层括号压一层；当前层里是正在读的这条语句的字符
+    n, i = len(text), 0
+
+    def flush():
+        s = " ".join("".join(frames[-1]).split())      # 空白压成单个空格：后面的正则不会被超长空白拖成二次方
+        if s:
+            out.append(s)
+        frames[-1] = []
+
+    while i < n:
+        ch = text[i]
+        cur = frames[-1]
+        if text.startswith("--", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            cur.append(" ")
+        elif text.startswith("/*", i):
+            level, i = 1, i + 2
+            while i < n and level:
+                if text.startswith("/*", i):
+                    level, i = level + 1, i + 2
+                elif text.startswith("*/", i):
+                    level, i = level - 1, i + 2
+                else:
+                    i += 1
+            cur.append(" ")
+        elif ch == "'":
+            esc = bool(cur) and cur[-1] in "Ee" and (len(cur) == 1 or not _word(cur[-2]))     # E'..' 里反斜杠是转义
+            j = i + 1
+            while j < n:
+                if esc and text[j] == "\\":
+                    j += 2
+                elif text.startswith("''", j):
+                    j += 2
+                elif text[j] == "'":
+                    break
+                else:
+                    j += 1
+            i = min(j + 1, n)
+            cur.append("'x'")
+        elif ch == '"':
+            j = i + 1
+            while j < n:
+                if text.startswith('""', j):
+                    j += 2
+                elif text[j] == '"':
+                    break
+                else:
+                    j += 1
+            i = min(j + 1, n)
+            cur.append('"x"')
+        elif ch == "$" and not (cur and _word(cur[-1])) and _DOLLAR_TAG.match(text, i):
+            tag = _DOLLAR_TAG.match(text, i).group(0)
+            end = text.find(tag, i + len(tag))
+            body = text[i + len(tag): n if end < 0 else end]
+            if _depth < _SQL_DEPTH:
+                out.extend(sql_units(body, _depth + 1))
+            i = n if end < 0 else end + len(tag)
+            cur.append("'x'")
+        elif ch == "(":
+            cur.append("()")
+            frames.append([])
+            i += 1
+        elif ch == ")":
+            if len(frames) > 1:
+                flush()
+                frames.pop()
+            i += 1
+        elif ch == ";":
+            flush()
+            i += 1
+        else:
+            cur.append(ch)
+            i += 1
+    while frames:
+        flush()
+        frames.pop()
+    return out
+
+
+_IDENT = r'(?:"x"|[\w$]+)(?: ?\. ?(?:"x"|[\w$]+))*'            # schema.table / "x"."y"（空白已压成单个空格）
+_UPDATE_HEAD = rf"\bUPDATE (?:ONLY )?(?!SET\b){_IDENT} ?\*? (?:(?:AS )?(?!SET\b)(?:\"x\"|\w+) )?SET\b"
+_WHERE = re.compile(r"\bWHERE\b", re.I)
+_TAUTOLOGY = re.compile(r"\bWHERE (?:TRUE|1 ?= ?1)(?: RETURNING\b.*)?$", re.I)   # WHERE true / WHERE 1=1：形式上有 WHERE，实际是整张表
+# 简单类：这个词组出现就算。TRUNCATE 作权限名、触发器事件时不是在清表：GRANT / REVOKE / COMMENT / CREATE TRIGGER 开头的语句不算
+_SQL_SIMPLE = {
+    "truncate": re.compile(r"^(?!(?:GRANT|REVOKE|COMMENT|ALTER DEFAULT PRIVILEGES|"
+                           r"CREATE (?:OR REPLACE )?(?:CONSTRAINT )?TRIGGER)\b).*?\bTRUNCATE\b(?! ?\()", re.I),
+    "drop_table": re.compile(r"\bDROP TABLE\b", re.I),
+    "drop_schema": re.compile(r"\bDROP SCHEMA\b", re.I),
+    "drop_database": re.compile(r"\bDROP DATABASE\b", re.I),
+}
+# 「没有 WHERE」类：只看这条语句里最后一个 DELETE FROM / UPDATE t SET 之后有没有 WHERE（前面的那些后面的 WHERE 只会更多），线性时间。
+# UPDATE t SET …：`ON CONFLICT DO UPDATE SET`、`ON UPDATE CASCADE`、`FOR UPDATE`、`GRANT UPDATE ON` 都不是
+_SQL_WRITE = {
+    "delete_no_where": re.compile(r"\bDELETE FROM\b", re.I),
+    "update_no_where": re.compile(_UPDATE_HEAD, re.I),
+}
+
+
+def _writes_without_where(head: "re.Pattern", unit: str) -> bool:
+    last = None
+    for last in head.finditer(unit):
+        pass
+    if last is None:
+        return False
+    tail = unit[last.end():]
+    return not _WHERE.search(tail) or bool(_TAUTOLOGY.search(tail))
+
+
+def sql_findings(text: str) -> list:
+    """这段 SQL 里有哪几类破坏性写法（SQL_CATEGORIES 里的名字，去重，按固定顺序）。只看语句本身，不执行、不连数据库。"""
+    if not _SQL_QUICK.search(text):
+        return []
+    found = set()
+    for unit in sql_units(text):
+        for cat, rx in _SQL_SIMPLE.items():
+            if cat not in found and rx.search(unit):
+                found.add(cat)
+        for cat, head in _SQL_WRITE.items():
+            if cat not in found and _writes_without_where(head, unit):
+                found.add(cat)
+    return [c for c in SQL_CATEGORIES if c in found]
+
+
+def _tool_strings(ti: dict, field: str | None = None) -> list:
+    """入参里要扫的字符串。给了 field 且它在入参里 → 只扫它；
+    没给，或者 field 不在入参里（工具改了字段名）→ 扫全部字符串值，宁可多看也不要悄悄失效。"""
+    def walk(v):
+        if isinstance(v, str):
+            yield v
+        elif isinstance(v, dict):
+            for x in v.values():
+                yield from walk(x)
+        elif isinstance(v, (list, tuple)):
+            for x in v:
+                yield from walk(x)
+    return list(walk(ti[field] if field and field in ti else ti))
+
+
+def check_tool(doc: dict, tool: str, ti: dict) -> list:
+    """forbid_tool_input：工具名命中某条启用规则的 tools（fnmatch，区分大小写），就扫它的入参。
+    消息里不回显 SQL 原文：只说是哪一类（入参可能带用户数据）。patterns 命中才带命中片段（最多 60 字）。"""
+    lang = doc.get("lang", "en")
+    out = []
+    for c in active(doc, "tool"):
+        if not any(fnmatch.fnmatchcase(tool, p) for p in c.get("tools") or []):
+            continue
+        deny = set(c.get("sql_deny") or ())
+        cats, frags = set(), []
+        for text in _tool_strings(ti, c.get("field")):
+            if deny:
+                cats.update(x for x in sql_findings(text) if x in deny)
+            if c.get("patterns"):
+                for unit in (sql_units(text) if c.get("normalize") == "sql" else [text]):
+                    for rx in _compiled(c):
+                        m = rx.search(unit)
+                        if m and m.group(0).strip()[:60] not in frags:
+                            frags.append(m.group(0).strip()[:60])
+        msgs = []
+        if cats:
+            what = ("；" if lang == "zh" else "; ").join(_t(lang, "sql_" + x) for x in SQL_CATEGORIES if x in cats)
+            msgs.append(_t(lang, "sql_found", tool=tool, what=what))
+        msgs.extend(_t(lang, "tool_match", tool=tool, m=f) for f in frags)
+        if msgs:
+            out.extend(_stamp(c, [Violation(c["id"], tool, 0, " / ".join(msgs))]))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 规则清单
 # ---------------------------------------------------------------------------
 def rules_path(root) -> Path:
@@ -343,7 +566,32 @@ def load_rules(root) -> dict:
     for c in doc["checks"]:
         if c.get("type") not in CHECK_TYPES:
             raise ValueError(f"{p}: 未知检查类型 / unknown check type {c.get('type')!r}")
+        if c["type"] == "forbid_tool_input":
+            _validate_tool_rule(p, c)
     return doc
+
+
+def _validate_tool_rule(p, c: dict) -> None:
+    """forbid_tool_input 写错了要在加载时就报出来 —— 否则它会悄悄什么都不拦。"""
+    cid = c.get("id")
+    tools = c.get("tools")
+    if not (isinstance(tools, list) and tools and all(isinstance(x, str) and x for x in tools)):
+        raise ValueError(f"{p}: {cid} 的 tools 要是非空的工具名列表 / 'tools' must be a non-empty list of tool names")
+    deny, pats = c.get("sql_deny") or [], c.get("patterns") or []
+    if not deny and not pats:
+        raise ValueError(f"{p}: {cid} 至少要有 patterns 或 sql_deny / needs 'patterns' or 'sql_deny'")
+    bad = [x for x in deny if x not in SQL_CATEGORIES]
+    if bad:
+        raise ValueError(f"{p}: {cid} 的 sql_deny 有不认识的类别 / unknown sql_deny {bad!r}；可用 / allowed: {', '.join(SQL_CATEGORIES)}")
+    if c.get("normalize") not in (None, *NORMALIZERS):
+        raise ValueError(f"{p}: {cid} 的 normalize 只能是 / must be one of {NORMALIZERS}")
+    if c.get("field") is not None and not isinstance(c["field"], str):
+        raise ValueError(f"{p}: {cid} 的 field 要是字符串 / 'field' must be a string")
+    for rx in pats:
+        try:
+            re.compile(rx)
+        except re.error as e:
+            raise ValueError(f"{p}: {cid} 的正则编译不过 / bad regex {rx!r}: {e}") from None
 
 
 def active(doc: dict, event: str) -> list:
@@ -927,6 +1175,12 @@ def hook(data: dict, engine_dir: Path | None = None):
         vs = check_bash(doc, ti.get("command") or "")
         if vs:
             return 2, "\n".join([_t(lang, "block_bash"), format_violations(vs, lang), _t(lang, "how")]), ""
+        return 0, "", ""
+
+    if event == "PreToolUse" and tool:            # Write / Edit / Bash 之外的工具（MCP）：看入参
+        vs = check_tool(doc, tool, ti)
+        if vs:
+            return 2, "\n".join([_t(lang, "block_tool"), format_violations(vs, lang), _t(lang, "how_tool")]), ""
         return 0, "", ""
 
     if event == "Stop":
